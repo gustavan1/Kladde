@@ -80,6 +80,17 @@ To open the folder, press **Windows key + R**, type `%APPDATA%\Kladde` and press
 
 **Move to a new PC:** install Kladde on the new PC and open it once, then close it. Restore your backup as described above.
 
+### Get your assignments from school
+
+1. In Kladde, open **Importér fra skole** and click **Åbn Mit Niels Brock** or **Åbn Ludus**. The school site opens in its own Kladde window.
+2. **Log in as usual.** Kladde never sees or stores your password. The school window forgets the login when you close it.
+3. **Go to the page with your assignments** (on Mit Niels Brock: **Deadlines**). Kladde finds the list by itself; you don't need to press anything.
+4. Back in Kladde, the assignments are listed with ticks. Untick anything you don't want and click **Gem valgte**. Assignments you already have are left unticked.
+
+On a page without a clear list (for example Ludus **Lektier**), press **"Hent afleveringer fra denne side"** in the bottom-right corner. The AI then reads that one page and picks out what you have to hand in and when. This needs AI to be switched on (section 4), and it only happens when you press.
+
+Other ways (a calendar link, a file or copied text) are under **Andre måder** at the bottom of the page.
+
 ### 4. AI (optional)
 
 **Cloudflare on both computers.** Open **AI helper → Set up your free account** (Danish: **AI-hjælper → Opsæt din gratis konto**). Each person can use their own free account and quota. The app walks you through these steps.

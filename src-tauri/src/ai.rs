@@ -37,7 +37,7 @@ impl AiState {
             settings: Mutex::new(settings),
         }
     }
-    fn get(&self) -> AiSettings {
+    pub(crate) fn get(&self) -> AiSettings {
         self.settings
             .lock()
             .unwrap_or_else(|p| p.into_inner())
@@ -56,6 +56,17 @@ impl AiState {
         .map_err(|e| err(500, e.to_string()))?;
         *guard = next;
         Ok(status(&guard))
+    }
+}
+
+impl AiSettings {
+    /// True when some AI provider is set up and can be used.
+    pub(crate) fn is_configured(&self) -> bool {
+        if cfg!(target_os = "macos") && self.use_codex {
+            !self.codex_model.is_empty()
+        } else {
+            !self.account.is_empty()
+        }
     }
 }
 
@@ -176,7 +187,7 @@ fn cf_url(account: &str) -> String {
     format!("https://api.cloudflare.com/client/v4/accounts/{account}/ai/v1/chat/completions")
 }
 
-fn generate(
+pub(crate) fn generate(
     app: &AppHandle,
     s: &AiSettings,
     system: &str,

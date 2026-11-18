@@ -30,6 +30,7 @@ import { CalendarLinks, ImportGuide } from "@/components/kladde/ImportExtras";
 import { WeeklyCard } from "@/components/kladde/StudyExtras";
 import { AiView, NoteAiTools, ProjectPlanner } from "@/components/kladde/AiExtras";
 import { CheckForUpdates, UpdateBanner } from "@/components/kladde/Updater";
+import { listen } from "@tauri-apps/api/event";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -1665,7 +1666,18 @@ function Homework({
   );
 }
 
-function ImportCenter({ lang, refresh }: { lang: Language; refresh: () => void }) {
+/** A page from the school window, read by Kladde and waiting for the user to confirm. */
+export type SchoolImport = { seq: number; preview: ImportPreview };
+
+function ImportCenter({
+  lang,
+  refresh,
+  incoming,
+}: {
+  lang: Language;
+  refresh: () => void;
+  incoming: SchoolImport | null;
+}) {
   const da = lang === "da";
   const [source, setSource] = useState<ImportSource>("lectio");
   const [content, setContent] = useState("");
@@ -1675,6 +1687,7 @@ function ImportCenter({ lang, refresh }: { lang: Language; refresh: () => void }
       apiPost<ImportPreview>("/imports/preview", payload),
     onSuccess: (result) => {
       setItems(result.items);
+      setMeta(null);
       toast.success(da ? `${result.items.length} elementer fundet` : `${result.items.length} items found`);
     },
     onError: (e) =>
@@ -1686,11 +1699,31 @@ function ImportCenter({ lang, refresh }: { lang: Language; refresh: () => void }
     onSuccess: (result) => {
       setItems([]);
       setContent("");
+      setMeta(null);
       refresh();
       toast.success(result.message);
     },
     onError: (e) => toast.error(errorDetail(e, da ? "Importen fejlede" : "The import failed")),
   });
+  // Format and warnings of the newest page from the school window (null: from the file import).
+  const [meta, setMeta] = useState<{ format: string; warnings: string[] } | null>(null);
+  const openSchool = useMutation({
+    mutationFn: (site: "ludus" | "mitnielsbrock") => apiPost("/school/open", { site }),
+    onError: (e) => toast.error(errorDetail(e, da ? "Skolevinduet kunne ikke åbnes" : "The school window could not open")),
+  });
+  // Each page read in the school window adds to the same list (already listed rows are skipped).
+  useEffect(() => {
+    if (!incoming) return;
+    const { preview: p } = incoming;
+    setSource(p.source);
+    setItems((current) => [
+      ...current,
+      ...p.items.filter(
+        (n) => !current.some((c) => c.external_id === n.external_id && c.subject === n.subject),
+      ),
+    ]);
+    setMeta({ format: p.detected_format, warnings: p.warnings });
+  }, [incoming]);
   const examples: Record<ImportSource, string> = {
     lectio:
       "Opgave,Fag,Afleveringsfrist\nDansk aflevering,Dansk,2026-09-14\nMatematik aflevering,Matematik,2026-09-18",
@@ -1703,6 +1736,8 @@ function ImportCenter({ lang, refresh }: { lang: Language; refresh: () => void }
     source === "lectio" ? "Lectio" : source === "ludus" ? "Ludus · Niels Brock" : "Mit Niels Brock";
   const loadFile = async (file: File) => setContent(await file.text());
   const selectedCount = items.filter((item) => item.selected).length;
+  const format = meta ? meta.format : preview.data?.detected_format;
+  const warnings = meta ? meta.warnings : (preview.data?.warnings ?? []);
   return (
     <div className="space-y-6" data-testid="imports-view">
       <div>
@@ -1720,10 +1755,160 @@ function ImportCenter({ lang, refresh }: { lang: Language; refresh: () => void }
           data-testid="imports-page-description"
         >
           {da
-            ? "Upload eller indsæt en eksport fra Lectio, Ludus eller Mit Niels Brock. Du ser altid en forhåndsvisning, før noget gemmes."
-            : "Upload or paste an export from Lectio, Ludus or Mit Niels Brock. You always preview records before saving."}
+            ? "Åbn din skoleside, log ind og gå til dine afleveringer. Kladde henter dem selv, og du vælger hvilke der skal gemmes."
+            : "Open your school site, log in and go to your assignments. Kladde fetches them, and you choose which to save."}
         </p>
       </div>
+      <Card className="border-blue-100 shadow-sm" data-testid="school-card">
+        <CardContent className="space-y-5 p-6">
+          <div className="grid gap-3 sm:grid-cols-2">
+            {(
+              [
+                ["mitnielsbrock", "Mit Niels Brock", da ? "Afleveringer og deadlines" : "Hand-ins and deadlines"],
+                ["ludus", "Ludus", da ? "Lektier og afleveringsplan" : "Homework and hand-in plan"],
+              ] as const
+            ).map(([site, name, what]) => (
+              <button
+                key={site}
+                onClick={() => openSchool.mutate(site)}
+                disabled={openSchool.isPending}
+                className="flex items-center gap-4 rounded-2xl bg-blue-600 p-5 text-left text-white shadow-lg shadow-blue-600/20 hover:-translate-y-0.5 hover:bg-blue-700"
+                data-testid={`school-open-${site}`}
+              >
+                <span className="grid size-11 shrink-0 place-items-center rounded-xl bg-white/15">
+                  <Globe2 className="size-5" />
+                </span>
+                <span>
+                  <span className="block font-heading text-lg font-semibold">
+                    {da ? `Åbn ${name}` : `Open ${name}`}
+                  </span>
+                  <span className="block text-xs text-blue-100">{what}</span>
+                </span>
+              </button>
+            ))}
+          </div>
+          <ol className="grid gap-3 text-sm text-slate-600 sm:grid-cols-3">
+            {(da
+              ? [
+                  "Log ind, som du plejer. Kladde ser aldrig din adgangskode.",
+                  "Gå til siden med dine afleveringer. Kladde henter dem selv.",
+                  "Tjek listen her i Kladde, og tryk “Gem valgte”.",
+                ]
+              : [
+                  "Log in as usual. Kladde never sees your password.",
+                  "Go to the page with your assignments. Kladde fetches them.",
+                  "Check the list here in Kladde and press “Save selected”.",
+                ]
+            ).map((step, i) => (
+              <li key={step} className="flex gap-3 rounded-xl bg-slate-50 p-3">
+                <span className="grid size-6 shrink-0 place-items-center rounded-full bg-blue-600 text-xs font-semibold text-white">
+                  {i + 1}
+                </span>
+                {step}
+              </li>
+            ))}
+          </ol>
+          <p className="flex items-start gap-2 text-xs leading-relaxed text-slate-400">
+            <CheckCircle2 className="mt-0.5 size-4 shrink-0 text-emerald-500" />
+            {da
+              ? "Skolevinduet glemmer dit login, når du lukker det. Står der ingen liste, så tryk “Hent afleveringer fra denne side” – så læser AI'en siden (kun når du trykker)."
+              : "The school window forgets your login when you close it. If a page has no list, press “Get assignments from this page” – the AI then reads the page (only when you press)."}
+          </p>
+        </CardContent>
+      </Card>
+      {items.length > 0 && (
+        <Card className="border-blue-200 shadow-sm" data-testid="import-preview-card">
+          <CardHeader className="flex flex-row items-center justify-between">
+            <div>
+              <CardTitle className="font-heading text-lg">
+                {da ? "Tjek før du gemmer" : "Review before saving"}
+              </CardTitle>
+              <p className="mt-1 text-xs text-slate-500">
+                {format} · {selectedCount} {da ? "valgt" : "selected"}
+              </p>
+            </div>
+            <div className="flex gap-2">
+              <Button
+                variant="outline"
+                onClick={() => setItems(items.map((i) => ({ ...i, selected: selectedCount < items.length })))}
+                data-testid="import-toggle-all-button"
+              >
+                {selectedCount < items.length
+                  ? da
+                    ? "Vælg alle"
+                    : "Select all"
+                  : da
+                    ? "Fravælg alle"
+                    : "Deselect all"}
+              </Button>
+              <Button
+                onClick={() => commit.mutate({ source, items })}
+                disabled={!selectedCount || commit.isPending}
+                className="bg-blue-600 hover:bg-blue-700"
+                data-testid="import-commit-button"
+              >
+                {commit.isPending ? (da ? "Gemmer…" : "Saving…") : da ? "Gem valgte" : "Save selected"}
+              </Button>
+            </div>
+          </CardHeader>
+          <CardContent className="space-y-2">
+            {warnings.map((warning) => (
+              <p className="rounded-lg bg-amber-50 p-3 text-xs text-amber-700" key={warning} data-testid="import-warning">
+                {warning}
+              </p>
+            ))}
+            {items.map((item, index) => (
+              <label
+                className="flex cursor-pointer items-start gap-3 rounded-xl border border-slate-100 p-3 hover:bg-slate-50"
+                key={`${item.external_id}-${index}`}
+                data-testid="import-preview-item"
+              >
+                <input
+                  type="checkbox"
+                  checked={item.selected}
+                  onChange={() =>
+                    setItems(
+                      items.map((current, currentIndex) =>
+                        currentIndex === index ? { ...current, selected: !current.selected } : current,
+                      ),
+                    )
+                  }
+                  className="mt-1 size-4 accent-blue-600"
+                  data-testid="import-item-checkbox"
+                />
+                <span className="min-w-0 flex-1">
+                  <span className="flex flex-wrap items-center gap-2">
+                    <span className="text-sm font-semibold text-slate-800">{item.title}</span>
+                    <Badge variant="outline" className="text-[10px]">
+                      {item.kind === "deadline"
+                        ? "Deadline"
+                        : item.kind === "lesson"
+                          ? da
+                            ? "Lektion"
+                            : "Lesson"
+                          : da
+                            ? "Fag"
+                            : "Subject"}
+                    </Badge>
+                  </span>
+                  <span className="mt-1 block text-xs text-slate-500">
+                    {item.subject}
+                    {item.date ? ` · ${dateLabel(item.date, lang)}` : item.day ? ` · ${item.day}` : ""}
+                    {item.time ? ` · ${item.time}` : ""}
+                    {item.end_time ? `–${item.end_time}` : ""}
+                  </span>
+                </span>
+              </label>
+            ))}
+          </CardContent>
+        </Card>
+      )}
+      <details className="group rounded-2xl border border-slate-200/80 bg-white p-4" data-testid="import-other-ways">
+        <summary className="cursor-pointer text-sm font-semibold text-slate-600">
+          {da ? "Andre måder: kalenderlink, fil eller kopieret tekst" : "Other ways: calendar link, file or copied text"}
+        </summary>
+        <div className="mt-5 space-y-6">
+          <CalendarLinks lang={lang} refresh={refresh} />
       <div className="grid gap-5 xl:grid-cols-[360px_minmax(0,1fr)]">
         <Card className="h-fit border-slate-200/80 shadow-sm" data-testid="import-source-card">
           <CardHeader>
@@ -1838,103 +2023,12 @@ function ImportCenter({ lang, refresh }: { lang: Language; refresh: () => void }
                     : "Preview import"}
               </Button>
             </div>
-            {items.length > 0 &&
-              preview.data?.warnings.map((warning) => (
-                <p
-                  className="rounded-lg bg-amber-50 p-3 text-xs text-amber-700"
-                  key={warning}
-                  data-testid="import-warning"
-                >
-                  {warning}
-                </p>
-              ))}
           </CardContent>
         </Card>
       </div>
-      {items.length > 0 && (
-        <Card className="border-blue-200 shadow-sm" data-testid="import-preview-card">
-          <CardHeader className="flex flex-row items-center justify-between">
-            <div>
-              <CardTitle className="font-heading text-lg">
-                {da ? "Tjek før du gemmer" : "Review before saving"}
-              </CardTitle>
-              <p className="mt-1 text-xs text-slate-500">
-                {preview.data?.detected_format} · {selectedCount} {da ? "valgt" : "selected"}
-              </p>
-            </div>
-            <div className="flex gap-2">
-              <Button
-                variant="outline"
-                onClick={() => setItems(items.map((i) => ({ ...i, selected: selectedCount < items.length })))}
-                data-testid="import-toggle-all-button"
-              >
-                {selectedCount < items.length
-                  ? da
-                    ? "Vælg alle"
-                    : "Select all"
-                  : da
-                    ? "Fravælg alle"
-                    : "Deselect all"}
-              </Button>
-              <Button
-                onClick={() => commit.mutate({ source, items })}
-                disabled={!selectedCount || commit.isPending}
-                className="bg-blue-600 hover:bg-blue-700"
-                data-testid="import-commit-button"
-              >
-                {commit.isPending ? (da ? "Gemmer…" : "Saving…") : da ? "Gem valgte" : "Save selected"}
-              </Button>
-            </div>
-          </CardHeader>
-          <CardContent className="space-y-2">
-            {items.map((item, index) => (
-              <label
-                className="flex cursor-pointer items-start gap-3 rounded-xl border border-slate-100 p-3 hover:bg-slate-50"
-                key={`${item.external_id}-${index}`}
-                data-testid="import-preview-item"
-              >
-                <input
-                  type="checkbox"
-                  checked={item.selected}
-                  onChange={() =>
-                    setItems(
-                      items.map((current, currentIndex) =>
-                        currentIndex === index ? { ...current, selected: !current.selected } : current,
-                      ),
-                    )
-                  }
-                  className="mt-1 size-4 accent-blue-600"
-                  data-testid="import-item-checkbox"
-                />
-                <span className="min-w-0 flex-1">
-                  <span className="flex flex-wrap items-center gap-2">
-                    <span className="text-sm font-semibold text-slate-800">{item.title}</span>
-                    <Badge variant="outline" className="text-[10px]">
-                      {item.kind === "deadline"
-                        ? "Deadline"
-                        : item.kind === "lesson"
-                          ? da
-                            ? "Lektion"
-                            : "Lesson"
-                          : da
-                            ? "Fag"
-                            : "Subject"}
-                    </Badge>
-                  </span>
-                  <span className="mt-1 block text-xs text-slate-500">
-                    {item.subject}
-                    {item.date ? ` · ${dateLabel(item.date, lang)}` : item.day ? ` · ${item.day}` : ""}
-                    {item.time ? ` · ${item.time}` : ""}
-                    {item.end_time ? `–${item.end_time}` : ""}
-                  </span>
-                </span>
-              </label>
-            ))}
-          </CardContent>
-        </Card>
-      )}
-      <CalendarLinks lang={lang} refresh={refresh} />
-      <ImportGuide lang={lang} />
+          <ImportGuide lang={lang} />
+        </div>
+      </details>
     </div>
   );
 }
@@ -2232,6 +2326,20 @@ export default function Home() {
   const [draft, setDraft] = useState<NoteDraft | null>(null);
   const [startNewNote, setStartNewNote] = useState(false);
   const qc = useQueryClient();
+  const [schoolImport, setSchoolImport] = useState<SchoolImport | null>(null);
+  // Pages read in the school window arrive here and open in the import list.
+  useEffect(() => {
+    const unlisten = [
+      listen<ImportPreview>("school-import", (event) => {
+        setSchoolImport((prev) => ({ seq: (prev?.seq ?? 0) + 1, preview: event.payload }));
+        setActiveState("imports");
+        const n = event.payload.items.length;
+        if (n) toast.success(lang === "da" ? `${n} fra ${event.payload.source_label} – tjek og gem` : `${n} from ${event.payload.source_label} – review and save`);
+      }),
+      listen<{ detail: string }>("school-import-error", (event) => toast.error(event.payload.detail)),
+    ];
+    return () => unlisten.forEach((p) => void p.then((stop) => stop()));
+  }, [lang]);
   const setLang = (v: Language) => {
     setLangState(v);
     writeStorage("kladde-language", v);
@@ -2372,7 +2480,7 @@ export default function Home() {
           ) : active === "ai" ? (
             <AiView lang={lang} subjects={data?.subjects || []} />
           ) : (
-            <ImportCenter lang={lang} refresh={refresh} />
+            <ImportCenter lang={lang} refresh={refresh} incoming={schoolImport} />
           )}
         </main>
         <footer
