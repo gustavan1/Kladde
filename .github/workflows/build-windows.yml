@@ -6,6 +6,11 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      publish_preview:
+        description: Publish these installers as a prerelease
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -67,7 +72,7 @@ jobs:
 
   release:
     needs: build
-    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    if: (github.ref == 'refs/heads/main' && github.event_name == 'push') || (github.event_name == 'workflow_dispatch' && inputs.publish_preview)
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -80,8 +85,11 @@ jobs:
       - name: Publish both downloads
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PUBLISH_PREVIEW: ${{ inputs.publish_preview }}
           BUILD_NUMBER: ${{ github.run_number }}
         run: |
-          gh release create "kladde-build-$BUILD_NUMBER" installers/*.exe installers/*.dmg \
+          flags=()
+          if [[ "$PUBLISH_PREVIEW" == "true" ]]; then flags+=(--prerelease); fi
+          gh release create "kladde-build-$BUILD_NUMBER" "${flags[@]}" installers/*.exe installers/*.dmg \
             --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "Kladde (build $BUILD_NUMBER)" \
             --notes "Choose the .exe for Windows x64 or the .dmg for an Apple Silicon Mac."

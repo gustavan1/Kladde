@@ -6,11 +6,33 @@ import { Input } from "@/components/ui/input";
 import { apiGet, apiPost, apiDelete, errorDetail } from "@/lib/api";
 
 type Language = "en" | "da";
-type Status = { configured: boolean; mac: boolean; provider: "cloudflare" | "codex"; model: string; account: string; codex_connected: boolean; models?: string[] };
-export const useAiStatus = () => useQuery({ queryKey: ["ai-status"], queryFn: () => apiGet<Status>("/ai/status"), staleTime: Infinity });
+type Status = {
+  configured: boolean;
+  mac: boolean;
+  provider: "cloudflare" | "codex";
+  model: string;
+  account: string;
+  codex_connected: boolean;
+  models?: string[];
+};
+export const useAiStatus = () =>
+  useQuery({
+    queryKey: ["ai-status"],
+    queryFn: () => apiGet<Status>("/ai/status"),
+    staleTime: Infinity,
+  });
 
 function Link({ url, children }: { url: string; children: string }) {
-  return <a className="text-blue-700 underline" href={url} target="_blank" rel="noreferrer">{children}</a>;
+  return (
+    <a
+      className="text-blue-700 underline"
+      href={url}
+      target="_blank"
+      rel="noreferrer"
+    >
+      {children}
+    </a>
+  );
 }
 
 export function AiSetup({ lang }: { lang: Language }) {
@@ -22,96 +44,392 @@ export function AiSetup({ lang }: { lang: Language }) {
   const [models, setModels] = useState<string[]>([]);
   const id = (account ?? s?.account ?? "").trim();
   const update = useMutation({
-    mutationFn: ({action, model}: {action: string; model?: string}) => {
-      if (action === "test") return apiPost<Status>("/ai/key", {account: id, key});
+    mutationFn: ({ action, model }: { action: string; model?: string }) => {
+      if (action === "test")
+        return apiPost<Status>("/ai/key", { account: id, key });
       if (action === "forget") return apiDelete<Status>("/ai/key");
-      return apiPost<Status>("/ai/codex", {action, model});
+      return apiPost<Status>("/ai/codex", { action, model });
     },
-    onSuccess: (result, {action}) => {
+    onSuccess: (result, { action }) => {
       qc.setQueryData(["ai-status"], result);
       if (result.models) setModels(result.models);
       if (action === "logout") setModels([]);
-      setKey(""); setAccount(null);
+      setKey("");
+      setAccount(null);
       toast.success(da ? "AI-indstillinger opdateret" : "AI settings updated");
     },
   });
-  return <section className="space-y-5 rounded-xl border border-blue-100 bg-white p-5 text-sm" data-testid="ai-setup-card">
-    <h2 className="font-heading text-lg font-semibold">Cloudflare Workers AI</h2>
-    <details open={!s?.account}>
-      <summary className="cursor-pointer font-medium">{da ? "Opsæt din gratis konto" : "Set up your free account"}</summary>
-      <ol className="mt-3 list-decimal space-y-2 pl-6 text-slate-700">
-        <li><Link url="https://dash.cloudflare.com/sign-up">{da ? "Opret en Cloudflare-konto" : "Create a Cloudflare account"}</Link>{da ? ", bekræft din e-mail, og vælg den gratis plan. Du behøver hverken et domæne eller en Worker." : ", verify your email and stay on the free plan. You can skip adding a domain or deploying a Worker."}</li>
-        <li><Link url="https://dash.cloudflare.com/">{da ? "Åbn dashboardet" : "Open the dashboard"}</Link>{da ? " og kopiér Account ID for din konto. " : " and copy your Account ID. "}<Link url="https://developers.cloudflare.com/fundamentals/account/find-account-and-zone-ids/">{da ? "Find dit Account ID" : "Find your Account ID"}</Link></li>
-        <li>{da ? "Åbn Workers AI i dashboardet. Vælg “Use REST API” og “Create a Workers AI API Token”. Vælg din konto og opret tokenet. " : "Open Workers AI in the dashboard. Choose “Use REST API” and “Create a Workers AI API Token”. Select your account and create the token. "}<Link url="https://developers.cloudflare.com/workers-ai/get-started/rest-api/">{da ? "Cloudflares trin-for-trin-guide" : "Cloudflare’s walkthrough"}</Link></li>
-        <li>{da ? "Hvis du opretter tokenet manuelt, så vælg din konto og Workers AI Read og Edit. Kopiér tokenet, mens det vises, og indsæt det nedenfor. " : "For a custom token, scope it to your account with Workers AI Read and Edit. Copy the token while it is visible and paste it below. "}<Link url="https://dash.cloudflare.com/profile/api-tokens">{da ? "Administrer tokens" : "Manage tokens"}</Link></li>
-      </ol>
-    </details>
-    <form className="space-y-3" onSubmit={e => {e.preventDefault(); update.mutate({action:"test"});}}>
-      <label className="block">Account ID<Input required value={account ?? s?.account ?? ""} onChange={e => setAccount(e.target.value)} pattern="[a-fA-F0-9]{32}" spellCheck={false} autoComplete="off" /></label>
-      <label className="block">API token<Input data-testid="ai-key-input" type="password" autoComplete="off" value={key} onChange={e => setKey(e.target.value)} placeholder={id && id === s?.account ? (da ? "Brug gemt token" : "Use saved token") : ""} /></label>
-      <div className="flex flex-wrap gap-2">
-        <Button type="submit" data-testid="ai-key-save" disabled={update.isPending || !id || (!key.trim() && id !== s?.account)}>{da ? "Test og brug Cloudflare" : "Test and use Cloudflare"}</Button>
-        {s?.account && <Button type="button" variant="outline" disabled={update.isPending} onClick={()=>update.mutate({action:"forget"})}>{da ? "Fjern gemt token" : "Remove saved token"}</Button>}
-      </div>
-    </form>
-    <p className="text-xs text-slate-600">{da ? "Testen sender kun “Say OK”. Tokenet gemmes i computerens nøglelager. Den gratis kvote er 10.000 neuroner pr. konto pr. dag og nulstilles kl. 00.00 UTC. " : "The test sends only “Say OK”. The token is stored in your computer’s credential store. The free allowance is 10,000 neurons per account per day and resets at 00:00 UTC. "}<Link url="https://developers.cloudflare.com/workers-ai/platform/pricing/">{da ? "Se gældende grænser" : "View current limits"}</Link></p>
-    {s?.mac && <div className="space-y-3 border-t pt-4">
-      <h2 className="font-heading text-lg font-semibold">ChatGPT · Codex</h2>
-      <p>{da ? "Log ind i browseren med en ChatGPT-konto, der har adgang til Codex. Kladde bruger abonnementets modeller og forbrugsgrænser." : "Sign in through your browser with a ChatGPT account that includes Codex. Kladde uses the models and usage limits available to your subscription."}</p>
-      <div className="flex flex-wrap items-center gap-2">
-        <Button disabled={update.isPending} onClick={()=>update.mutate({action:"connect"})}>{da ? "Forbind og brug ChatGPT" : "Connect and use ChatGPT"}</Button>
-        {s.provider === "codex" && (models.length ? <label>Model <select className="rounded border p-2" value={s.model} disabled={update.isPending} onChange={e=>update.mutate({action:"select",model:e.target.value})}>{models.map(m=><option key={m}>{m}</option>)}</select></label> : <Button variant="outline" disabled={update.isPending} onClick={()=>update.mutate({action:"models"})}>{s.model} · {da ? "Skift model" : "Change model"}</Button>)}
-        {s.codex_connected && <Button variant="outline" disabled={update.isPending} onClick={()=>update.mutate({action:"logout"})}>{da ? "Log ud" : "Sign out"}</Button>}
-      </div>
-    </div>}
-    <p className="text-xs text-slate-600">{da ? "Den valgte tjeneste modtager tekst fra det AI-værktøj, du bruger. Chatten sender dit spørgsmål, tidligere beskeder i faget og dine lektier. Vælger du et fag, sendes også uddrag af fagets noter." : "Your selected provider receives the text used by each AI tool. Chat sends your question, recent subject messages and homework. Selecting a subject also sends excerpts from its notes."}</p>
-    {update.isPending && <p role="status">{da ? "Forbinder…" : "Connecting…"}</p>}
-    {update.isError && <p role="alert" className="text-red-700">{errorDetail(update.error, da ? "Forbindelsen mislykkedes." : "Connection failed.")}</p>}
-  </section>;
+  return (
+    <section
+      className="space-y-5 rounded-xl border border-blue-100 bg-white p-5 text-sm"
+      data-testid="ai-setup-card"
+    >
+      <h2 className="font-heading text-lg font-semibold">
+        Cloudflare Workers AI
+      </h2>
+      <details open={!s?.account}>
+        <summary className="cursor-pointer font-medium">
+          {da ? "Opsæt din gratis konto" : "Set up your free account"}
+        </summary>
+        <ol className="mt-3 list-decimal space-y-2 pl-6 text-slate-700">
+          <li>
+            <Link url="https://dash.cloudflare.com/sign-up">
+              {da ? "Opret en Cloudflare-konto" : "Create a Cloudflare account"}
+            </Link>
+            {da
+              ? ", bekræft din e-mail, og vælg den gratis plan. Du behøver hverken et domæne eller en Worker."
+              : ", verify your email and stay on the free plan. You can skip adding a domain or deploying a Worker."}
+          </li>
+          <li>
+            <Link url="https://dash.cloudflare.com/">
+              {da ? "Åbn dashboardet" : "Open the dashboard"}
+            </Link>
+            {da
+              ? " og kopiér Account ID for din konto. "
+              : " and copy your Account ID. "}
+            <Link url="https://developers.cloudflare.com/fundamentals/account/find-account-and-zone-ids/">
+              {da ? "Find dit Account ID" : "Find your Account ID"}
+            </Link>
+          </li>
+          <li>
+            {da
+              ? "Åbn Workers AI i dashboardet. Vælg “Use REST API” og “Create a Workers AI API Token”. Vælg din konto og opret tokenet. "
+              : "Open Workers AI in the dashboard. Choose “Use REST API” and “Create a Workers AI API Token”. Select your account and create the token. "}
+            <Link url="https://developers.cloudflare.com/workers-ai/get-started/rest-api/">
+              {da
+                ? "Cloudflares trin-for-trin-guide"
+                : "Cloudflare’s walkthrough"}
+            </Link>
+          </li>
+          <li>
+            {da
+              ? "Hvis du opretter tokenet manuelt, så vælg din konto og Workers AI Read og Edit. Kopiér tokenet, mens det vises, og indsæt det nedenfor. "
+              : "For a custom token, scope it to your account with Workers AI Read and Edit. Copy the token while it is visible and paste it below. "}
+            <Link url="https://dash.cloudflare.com/profile/api-tokens">
+              {da ? "Administrer tokens" : "Manage tokens"}
+            </Link>
+          </li>
+        </ol>
+      </details>
+      <form
+        className="space-y-3"
+        onSubmit={(e) => {
+          e.preventDefault();
+          update.mutate({ action: "test" });
+        }}
+      >
+        <label className="block">
+          Account ID
+          <Input
+            required
+            value={account ?? s?.account ?? ""}
+            onChange={(e) => setAccount(e.target.value)}
+            pattern="[a-fA-F0-9]{32}"
+            spellCheck={false}
+            autoComplete="off"
+          />
+        </label>
+        <label className="block">
+          API token
+          <Input
+            data-testid="ai-key-input"
+            type="password"
+            autoComplete="off"
+            value={key}
+            onChange={(e) => setKey(e.target.value)}
+            placeholder={
+              id && id === s?.account
+                ? da
+                  ? "Brug gemt token"
+                  : "Use saved token"
+                : ""
+            }
+          />
+        </label>
+        <div className="flex flex-wrap gap-2">
+          <Button
+            type="submit"
+            data-testid="ai-key-save"
+            disabled={
+              update.isPending || !id || (!key.trim() && id !== s?.account)
+            }
+          >
+            {da ? "Test og brug Cloudflare" : "Test and use Cloudflare"}
+          </Button>
+          {s?.account && (
+            <Button
+              type="button"
+              variant="outline"
+              disabled={update.isPending}
+              onClick={() => update.mutate({ action: "forget" })}
+            >
+              {da ? "Fjern gemt token" : "Remove saved token"}
+            </Button>
+          )}
+        </div>
+      </form>
+      <p className="text-xs text-slate-600">
+        {da
+          ? "Testen sender kun “Say OK”. Tokenet gemmes i computerens nøglelager. Den gratis kvote er 10.000 neuroner pr. konto pr. dag og nulstilles kl. 00.00 UTC. "
+          : "The test sends only “Say OK”. The token is stored in your computer’s credential store. The free allowance is 10,000 neurons per account per day and resets at 00:00 UTC. "}
+        <Link url="https://developers.cloudflare.com/workers-ai/platform/pricing/">
+          {da ? "Se gældende grænser" : "View current limits"}
+        </Link>
+      </p>
+      {s?.mac && (
+        <div className="space-y-3 border-t pt-4">
+          <h2 className="font-heading text-lg font-semibold">
+            ChatGPT · Codex
+          </h2>
+          <p>
+            {da
+              ? "Log ind i browseren med en ChatGPT-konto, der har adgang til Codex. Kladde bruger abonnementets modeller og forbrugsgrænser."
+              : "Sign in through your browser with a ChatGPT account that includes Codex. Kladde uses the models and usage limits available to your subscription."}
+          </p>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              disabled={update.isPending}
+              onClick={() => update.mutate({ action: "connect" })}
+            >
+              {da ? "Forbind og brug ChatGPT" : "Connect and use ChatGPT"}
+            </Button>
+            {s.provider === "codex" &&
+              (models.length ? (
+                <label>
+                  Model{" "}
+                  <select
+                    className="rounded border p-2"
+                    value={s.model}
+                    disabled={update.isPending}
+                    onChange={(e) =>
+                      update.mutate({ action: "select", model: e.target.value })
+                    }
+                  >
+                    {models.map((m) => (
+                      <option key={m}>{m}</option>
+                    ))}
+                  </select>
+                </label>
+              ) : (
+                <Button
+                  variant="outline"
+                  disabled={update.isPending}
+                  onClick={() => update.mutate({ action: "models" })}
+                >
+                  {s.model} · {da ? "Skift model" : "Change model"}
+                </Button>
+              ))}
+            {s.codex_connected && (
+              <Button
+                variant="outline"
+                disabled={update.isPending}
+                onClick={() => update.mutate({ action: "logout" })}
+              >
+                {da ? "Log ud" : "Sign out"}
+              </Button>
+            )}
+          </div>
+        </div>
+      )}
+      <p className="text-xs text-slate-600">
+        {da
+          ? "Den valgte tjeneste modtager tekst fra det AI-værktøj, du bruger. Chatten sender dit spørgsmål, tidligere beskeder i faget og dine lektier. Vælger du et fag, sendes også uddrag af fagets noter."
+          : "Your selected provider receives the text used by each AI tool. Chat sends your question, recent subject messages and homework. Selecting a subject also sends excerpts from its notes."}
+      </p>
+      {update.isPending && (
+        <p role="status">{da ? "Forbinder…" : "Connecting…"}</p>
+      )}
+      {update.isError && (
+        <p role="alert" className="text-red-700">
+          {errorDetail(
+            update.error,
+            da ? "Forbindelsen mislykkedes." : "Connection failed.",
+          )}
+        </p>
+      )}
+    </section>
+  );
 }
 
 type Item = { id: string; title: string; subject: string };
-type Inbox = { shared: string | null; drafts: (Item & {kind: string; content?: string; deadline?: string})[] };
+type Inbox = {
+  shared: string | null;
+  drafts: (Item & { kind: string; content?: string; deadline?: string })[];
+};
 
-export function ClaudePanel({lang}: {lang: Language}) {
+export function ClaudePanel({ lang }: { lang: Language }) {
   const da = lang === "da";
   const qc = useQueryClient();
-  const [open,setOpen] = useState(false);
-  const [selection,setSelection] = useState("");
-  const dashboard = useQuery({queryKey:["dashboard"], queryFn:()=>apiGet<{notes:Item[];tasks:Item[]}>("/dashboard"), enabled:open});
-  const inbox = useQuery({queryKey:["claude-inbox"],queryFn:()=>apiPost<Inbox>("/claude",{action:"status"}),enabled:open,refetchInterval:open ? 5000 : false});
-  const update = useMutation({
-    mutationFn: (args:{action:string;id?:string;kind?:string}) => apiPost<Inbox>("/claude",args),
-    onSuccess: (result,args) => {
-      qc.setQueryData(["claude-inbox"],result);
-      if(args.action==="install") toast.success(da ? "Luk Claude Desktop helt, og åbn det igen." : "Quit and reopen Claude Desktop.");
-      if(args.action==="accept") {
-        void qc.invalidateQueries({queryKey:["dashboard"]});
-        void qc.invalidateQueries({queryKey:["weekly-summary"]});
-      }
-    }
+  const [open, setOpen] = useState(false);
+  const [selection, setSelection] = useState("");
+  const dashboard = useQuery({
+    queryKey: ["dashboard"],
+    queryFn: () => apiGet<{ notes: Item[]; tasks: Item[] }>("/dashboard"),
+    enabled: open,
   });
-  return <details className="space-y-3 rounded-xl border bg-white p-4 text-sm" onToggle={e=>setOpen(e.currentTarget.open)}>
-    <summary className="cursor-pointer font-medium">Claude Desktop · {da ? "Del en note eller lektie" : "Share a note or homework"}</summary>
-    <ol className="list-decimal space-y-2 pl-6">
-      <li>{da ? "Flyt Kladde til Programmer. Installér " : "Move Kladde to Applications. Install "}<Link url="https://claude.com/download">Claude Desktop</Link>{da ? " og log ind med din Claude-konto." : " and sign in with your Claude account."}</li>
-      <li>{da ? "Føj Kladde til Claude Desktops MCP-indstillinger med knappen herunder. Luk derefter Claude helt med ⌘Q og åbn det igen." : "Use the button below to add Kladde to Claude Desktop’s MCP settings. Quit Claude with ⌘Q and reopen it."}</li>
-      <li>{da ? "Del et emne nedenfor. Bed Claude i Claude Desktop om at læse det via Kladde og foreslå et udkast. Tillad værktøjet, når Claude spørger. Gennemse udkastet her." : "Share an item below. In Claude Desktop, ask Claude to read it using Kladde and suggest a draft. Allow the tool when prompted, then review the draft here."}</li>
-    </ol>
-    <Button variant="outline" disabled={update.isPending} onClick={()=>update.mutate({action:"install"})}>{da ? "Føj Kladde til Claude Desktop" : "Add Kladde to Claude Desktop"}</Button>
-    <div className="flex flex-wrap gap-2">
-      <select className="max-w-full rounded border p-2" aria-label={da ? "Vælg emne" : "Select item"} value={selection} onChange={e=>setSelection(e.target.value)}>
-        <option value="">{da ? "Vælg en note eller lektie" : "Choose a note or homework"}</option>
-        {(["notes","tasks"] as const).map(group=><optgroup key={group} label={group==="notes" ? (da?"Noter":"Notes") : (da?"Lektier":"Homework")}>{dashboard.data?.[group].map(i=><option key={i.id} value={group+"|"+i.id}>{i.subject} · {i.title}</option>)}</optgroup>)}
-      </select>
-      <Button disabled={!selection || update.isPending} onClick={()=>{const [group,id]=selection.split("|"); update.mutate({action:"share",kind:group==="notes"?"note":"task",id});}}>{da ? "Del med Claude" : "Share with Claude"}</Button>
-    </div>
-    {inbox.data?.shared && <p>{da ? "Delt kopi" : "Shared snapshot"} · {inbox.data.shared} <Button variant="outline" disabled={update.isPending} onClick={()=>update.mutate({action:"revoke"})}>{da ? "Stop deling" : "Stop sharing"}</Button></p>}
-    {inbox.data?.drafts.map(d=><article className="space-y-2 rounded border p-3" key={d.id}>
-      <h3 className="font-semibold">{d.title}</h3><p>{d.subject} · {d.kind==="note"?(da?"Note":"Note"):(da?"Lektie":"Homework")} {d.deadline}</p>
-      {d.content && <p className="max-h-60 overflow-auto whitespace-pre-wrap">{d.content}</p>}
-      <div className="flex gap-2"><Button disabled={update.isPending} onClick={()=>update.mutate({action:"accept",id:d.id})}>{da ? "Gem som ny" : "Save as new"}</Button><Button variant="outline" disabled={update.isPending} onClick={()=>update.mutate({action:"discard",id:d.id})}>{da ? "Kassér" : "Discard"}</Button></div>
-    </article>)}
-    {(update.isError || inbox.isError) && <p role="alert" className="text-red-700">{errorDetail(update.error || inbox.error,da ? "Claude-forbindelsen mislykkedes." : "Claude connection failed.")}</p>}
-  </details>;
+  const inbox = useQuery({
+    queryKey: ["claude-inbox"],
+    queryFn: () => apiPost<Inbox>("/claude", { action: "status" }),
+    enabled: open,
+    refetchInterval: open ? 5000 : false,
+  });
+  const update = useMutation({
+    mutationFn: (args: { action: string; id?: string; kind?: string }) =>
+      apiPost<Inbox>("/claude", args),
+    onSuccess: (result, args) => {
+      qc.setQueryData(["claude-inbox"], result);
+      if (args.action === "install")
+        toast.success(
+          da
+            ? "Luk Claude Desktop helt, og åbn det igen."
+            : "Quit and reopen Claude Desktop.",
+        );
+      if (args.action === "accept") {
+        void qc.invalidateQueries({ queryKey: ["dashboard"] });
+        void qc.invalidateQueries({ queryKey: ["weekly-summary"] });
+      }
+    },
+  });
+  return (
+    <details
+      className="space-y-3 rounded-xl border bg-white p-4 text-sm"
+      onToggle={(e) => setOpen(e.currentTarget.open)}
+    >
+      <summary className="cursor-pointer font-medium">
+        Claude Desktop ·{" "}
+        {da ? "Del en note eller lektie" : "Share a note or homework"}
+      </summary>
+      <ol className="list-decimal space-y-2 pl-6">
+        <li>
+          {da
+            ? "Flyt Kladde til Programmer. Installér "
+            : "Move Kladde to Applications. Install "}
+          <Link url="https://claude.com/download">Claude Desktop</Link>
+          {da
+            ? " og log ind med din Claude-konto."
+            : " and sign in with your Claude account."}
+        </li>
+        <li>
+          {da
+            ? "Føj Kladde til Claude Desktops MCP-indstillinger med knappen herunder. Luk derefter Claude helt med ⌘Q og åbn det igen."
+            : "Use the button below to add Kladde to Claude Desktop’s MCP settings. Quit Claude with ⌘Q and reopen it."}
+        </li>
+        <li>
+          {da
+            ? "Del et emne nedenfor. Bed Claude i Claude Desktop om at læse det via Kladde og foreslå et udkast. Tillad værktøjet, når Claude spørger. Gennemse udkastet her."
+            : "Share an item below. In Claude Desktop, ask Claude to read it using Kladde and suggest a draft. Allow the tool when prompted, then review the draft here."}
+        </li>
+      </ol>
+      <Button
+        variant="outline"
+        disabled={update.isPending}
+        onClick={() => update.mutate({ action: "install" })}
+      >
+        {da ? "Føj Kladde til Claude Desktop" : "Add Kladde to Claude Desktop"}
+      </Button>
+      <div className="flex flex-wrap gap-2">
+        <select
+          className="max-w-full rounded border p-2"
+          aria-label={da ? "Vælg emne" : "Select item"}
+          value={selection}
+          onChange={(e) => setSelection(e.target.value)}
+        >
+          <option value="">
+            {da ? "Vælg en note eller lektie" : "Choose a note or homework"}
+          </option>
+          {(["notes", "tasks"] as const).map((group) => (
+            <optgroup
+              key={group}
+              label={
+                group === "notes"
+                  ? da
+                    ? "Noter"
+                    : "Notes"
+                  : da
+                    ? "Lektier"
+                    : "Homework"
+              }
+            >
+              {dashboard.data?.[group].map((i) => (
+                <option key={i.id} value={group + "|" + i.id}>
+                  {i.subject} · {i.title}
+                </option>
+              ))}
+            </optgroup>
+          ))}
+        </select>
+        <Button
+          disabled={!selection || update.isPending}
+          onClick={() => {
+            const [group, id] = selection.split("|");
+            update.mutate({
+              action: "share",
+              kind: group === "notes" ? "note" : "task",
+              id,
+            });
+          }}
+        >
+          {da ? "Del med Claude" : "Share with Claude"}
+        </Button>
+      </div>
+      {inbox.data?.shared && (
+        <p>
+          {da ? "Delt kopi" : "Shared snapshot"} · {inbox.data.shared}{" "}
+          <Button
+            variant="outline"
+            disabled={update.isPending}
+            onClick={() => update.mutate({ action: "revoke" })}
+          >
+            {da ? "Stop deling" : "Stop sharing"}
+          </Button>
+        </p>
+      )}
+      {inbox.data?.drafts.map((d) => (
+        <article className="space-y-2 rounded border p-3" key={d.id}>
+          <h3 className="font-semibold">{d.title}</h3>
+          <p>
+            {d.subject} ·{" "}
+            {d.kind === "note"
+              ? da
+                ? "Note"
+                : "Note"
+              : da
+                ? "Lektie"
+                : "Homework"}{" "}
+            {d.deadline}
+          </p>
+          {d.content && (
+            <p className="max-h-60 overflow-auto whitespace-pre-wrap">
+              {d.content}
+            </p>
+          )}
+          <div className="flex gap-2">
+            <Button
+              disabled={update.isPending}
+              onClick={() => update.mutate({ action: "accept", id: d.id })}
+            >
+              {da ? "Gem som ny" : "Save as new"}
+            </Button>
+            <Button
+              variant="outline"
+              disabled={update.isPending}
+              onClick={() => update.mutate({ action: "discard", id: d.id })}
+            >
+              {da ? "Kassér" : "Discard"}
+            </Button>
+          </div>
+        </article>
+      ))}
+      {(update.isError || inbox.isError) && (
+        <p role="alert" className="text-red-700">
+          {errorDetail(
+            update.error || inbox.error,
+            da
+              ? "Claude-forbindelsen mislykkedes."
+              : "Claude connection failed.",
+          )}
+        </p>
+      )}
+    </details>
+  );
 }

@@ -139,7 +139,28 @@ fn cloudflare_at(
         .set("Authorization", &format!("Bearer {key}"))
         .send_json(json!({"model":CF_MODEL,"messages":chat,"max_tokens":4096,"stream":false}))
         .map_err(|e| match e {
-            ureq::Error::Status(code, _) => cf_error(code, lang),
+            ureq::Error::Status(code, response) => {
+                let body = response.into_json::<Value>().unwrap_or_default();
+                match body["errors"][0]["code"].as_u64() {
+                    Some(3036) => err(
+                        429,
+                        tr(
+                            lang,
+                            "Din gratis dagskvote er brugt. Prøv igen efter kl. 00.00 UTC.",
+                            "Your daily free allowance is used up. Try again after 00:00 UTC.",
+                        ),
+                    ),
+                    Some(3040) => err(
+                        429,
+                        tr(
+                            lang,
+                            "Cloudflare har travlt. Prøv igen om lidt.",
+                            "Cloudflare is temporarily at capacity. Try again shortly.",
+                        ),
+                    ),
+                    _ => cf_error(code, lang),
+                }
+            }
             _ => cf_error(0, lang),
         })?;
     let body: Value = response.into_json().map_err(|_| cf_error(502, lang))?;
@@ -664,6 +685,67 @@ mod tests {
             .detail
             .contains("permissions"));
         assert_eq!(cf_error(0, &None).status, 503);
+    }
+
+    #[test]
+    fn cloudflare_transport_sends_authenticated_chat_and_reads_reply() {
+        use std::io::{BufRead, BufReader, Read, Write};
+        let socket = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!(
+            "http://{}/ai/v1/chat/completions",
+            socket.local_addr().unwrap()
+        );
+        let handler = std::thread::spawn(move || {
+            let (mut stream, _) = socket.accept().unwrap();
+            let mut reader = BufReader::new(&stream);
+            let mut headers = String::new();
+            loop {
+                let mut line = String::new();
+                assert_ne!(reader.read_line(&mut line).unwrap(), 0);
+                if line.trim().is_empty() {
+                    break;
+                }
+                headers.push_str(&line.to_lowercase());
+            }
+            assert!(headers.starts_with("post /ai/v1/chat/completions http/1.1"));
+            assert!(headers.contains("authorization: bearer test-token"));
+            let len = headers
+                .lines()
+                .find_map(|line| line.strip_prefix("content-length: "))
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap();
+            let mut body = vec![0; len];
+            reader.read_exact(&mut body).unwrap();
+            let body: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(body["model"], CF_MODEL);
+            assert_eq!(
+                body["messages"][1],
+                json!({"role":"user","content":"Say OK."})
+            );
+            let reply = r#"{"choices":[{"message":{"content":"OK"}}]}"#;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                reply.len(),
+                reply
+            )
+            .unwrap();
+        });
+        assert_eq!(
+            cloudflare_at(
+                &url,
+                "test-token",
+                "Reply briefly.",
+                vec![json!({"role":"user","content":"Say OK."})],
+                None,
+                &None
+            )
+            .unwrap(),
+            "OK"
+        );
+        handler.join().unwrap();
     }
 
     #[test]

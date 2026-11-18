@@ -105,6 +105,7 @@ pub struct CalendarFeed {
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 #[serde(default)]
 pub struct ChatMessage {
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub provider: String,
     pub id: String,
     /// "user" | "assistant"

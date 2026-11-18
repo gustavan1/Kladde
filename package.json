@@ -6,6 +6,7 @@
   "type": "module",
   "scripts": {
     "app": "tauri dev",
+    "dist:mac": "bash scripts/prepare-mac.sh && tauri build --target aarch64-apple-darwin --bundles dmg",
     "dist:win": "tauri build --bundles nsis",
     "test": "cargo test --manifest-path src-tauri/Cargo.toml",
     "vite": "vite",
