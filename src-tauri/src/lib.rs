@@ -1,5 +1,6 @@
 //! Kladde desktop app: one window, one copy at a time, data in %APPDATA%\Kladde\kladde.json.
 
+mod ai;
 mod commands;
 mod feeds;
 mod importers;
@@ -99,6 +100,8 @@ pub fn run() {
             match store::Store::open(&dir.join("kladde.json")) {
                 Ok(store) => {
                     app.manage(AppState { store: Mutex::new(store) });
+                    // The Gemini key lives in settings.json, outside kladde.json and its backups.
+                    app.manage(ai::AiState::load(dir.join("settings.json")));
                     create_window(app.handle())?;
                     feeds::start_auto_sync(app.handle().clone());
                 }
@@ -138,6 +141,16 @@ pub fn run() {
             commands::add_feed,
             commands::sync_feed,
             commands::delete_feed,
+            ai::ai_status,
+            ai::ai_save_key,
+            ai::ai_models,
+            ai::ai_set_model,
+            ai::ai_forget_key,
+            ai::ai_note,
+            ai::ai_project_plan,
+            ai::ai_messages,
+            ai::ai_clear_chat,
+            ai::ai_chat,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Kladde");

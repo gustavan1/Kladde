@@ -7,6 +7,7 @@ src-tauri/gen/
 
 # Data files and backups (never commit personal data)
 kladde.json
+settings.json
 kladde.json.tmp
 kladde-backup-*.json
 data/

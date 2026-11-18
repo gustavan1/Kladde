@@ -14,7 +14,7 @@ createRoot(document.getElementById("root")!).render(
     <QueryClientProvider client={queryClient}>
       <BrowserRouter>
         <App />
-        <Toaster richColors position="bottom-right" closeButton />
+        <Toaster richColors position="bottom-left" closeButton />
       </BrowserRouter>
     </QueryClientProvider>
   </StrictMode>,

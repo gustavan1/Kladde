@@ -61,6 +61,17 @@ const routes: Route[] = [
   ["POST", /^\/calendar-feeds$/, "add_feed", withBody],
   ["POST", /^\/calendar-feeds\/([^/]+)\/sync$/, "sync_feed", withId],
   ["DELETE", /^\/calendar-feeds\/([^/]+)$/, "delete_feed", withId],
+  // AI (Google Gemini)
+  ["GET", /^\/ai\/status$/, "ai_status", noArgs],
+  ["POST", /^\/ai\/key$/, "ai_save_key", withBody],
+  ["DELETE", /^\/ai\/key$/, "ai_forget_key", noArgs],
+  ["GET", /^\/ai\/models$/, "ai_models", noArgs],
+  ["POST", /^\/ai\/model$/, "ai_set_model", withBody],
+  ["POST", /^\/ai\/note$/, "ai_note", withBody],
+  ["POST", /^\/ai\/project-plan$/, "ai_project_plan", withBody],
+  ["GET", /^\/ai\/messages$/, "ai_messages", noArgs],
+  ["POST", /^\/ai\/chat$/, "ai_chat", withBody],
+  ["DELETE", /^\/ai\/messages$/, "ai_clear_chat", noArgs],
 ];
 
 /** Calls a Rust command and turns its { status, detail } errors into ApiError. */

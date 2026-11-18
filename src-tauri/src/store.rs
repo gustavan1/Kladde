@@ -101,6 +101,18 @@ pub struct CalendarFeed {
     pub imported_blocks: i64,
 }
 
+/// One message in the AI helper chat.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(default)]
+pub struct ChatMessage {
+    pub id: String,
+    /// "user" | "assistant"
+    pub role: String,
+    pub content: String,
+    pub subject: String,
+    pub created_at: String,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Data {
     #[serde(default = "default_version")]
@@ -115,6 +127,9 @@ pub struct Data {
     pub blocks: Vec<Block>,
     #[serde(default)]
     pub feeds: Vec<CalendarFeed>,
+    /// The AI helper chat (kept so a conversation continues after a restart).
+    #[serde(default)]
+    pub messages: Vec<ChatMessage>,
     /// Anything else in the file is kept untouched.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
@@ -158,6 +173,7 @@ impl Default for Data {
             tasks: vec![],
             blocks: vec![],
             feeds: vec![],
+            messages: vec![],
             extra: Map::new(),
         }
     }
@@ -375,6 +391,19 @@ pub fn parse_date(date: &str) -> Option<NaiveDate> {
     NaiveDate::parse_from_str(date, "%Y-%m-%d").ok()
 }
 
+/// True for a real calendar date written as YYYY-MM-DD.
+pub fn is_valid_date(date: &str) -> bool {
+    parse_date(date).is_some()
+}
+
+/// Whole days from `from` to `to` (0 if either is not a date).
+pub fn days_between(from: &str, to: &str) -> i64 {
+    match (parse_date(from), parse_date(to)) {
+        (Some(a), Some(b)) => (b - a).num_days(),
+        _ => 0,
+    }
+}
+
 pub fn add_days(date: &str, days: i64) -> String {
     match parse_date(date) {
         Some(d) => (d + Duration::days(days)).format("%Y-%m-%d").to_string(),
@@ -430,7 +459,8 @@ mod tests {
   "tasks": [{"id": "t1", "title": "Analyse", "subject": "Dansk", "subject_key": "dansk", "deadline": "2026-11-20", "status": "done", "priority": "high", "estimated_minutes": 90, "created_at": "2026-11-18T10:00:00.000Z", "completed_at": "2026-11-18T11:00:00.000Z", "external_id": null}],
   "blocks": [{"id": "b1", "day": "Mandag", "time": "08:15", "label": "Dansk modul", "subject": "Dansk", "color": "blue", "source": "import", "minutes": 90, "external_id": "abc"}],
   "feeds": [],
-  "messages": [{"id": "m1", "role": "user", "content": "hej"}]
+  "messages": [{"id": "m1", "role": "user", "content": "hej", "subject": "Generelt", "created_at": "2026-11-18T10:00:00.000Z"}],
+  "future_feature": {"enabled": true}
 }"#;
         fs::write(&path, old).unwrap();
         let store = Store::open(&path).unwrap();
@@ -439,7 +469,8 @@ mod tests {
         assert_eq!(store.data.tasks[0].estimated_minutes, 90);
         assert_eq!(store.data.tasks[0].completed_at.as_deref(), Some("2026-11-18T11:00:00.000Z"));
         assert_eq!(store.data.blocks[0].minutes, Some(90));
-        assert!(store.data.extra.contains_key("messages"));
+        assert_eq!(store.data.messages[0].content, "hej");
+        assert!(store.data.extra.contains_key("future_feature"));
 
         store.save().unwrap();
         let again: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();

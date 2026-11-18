@@ -1984,7 +1984,7 @@ dependencies = [
 
 [[package]]
 name = "kladde"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "chrono",
  "regex",
@@ -4376,6 +4376,8 @@ dependencies = [
  "once_cell",
  "rustls",
  "rustls-pki-types",
+ "serde",
+ "serde_json",
  "url",
  "webpki-roots 0.26.11",
 ]

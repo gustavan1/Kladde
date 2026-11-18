@@ -1,6 +1,6 @@
 [package]
 name = "kladde"
-version = "1.0.0"
+version = "1.1.0"
 description = "Kladde – noter, lektier og studieplan"
 edition = "2021"
 rust-version = "1.82"
@@ -23,7 +23,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 uuid = { version = "1", features = ["v4"] }
 sha1_smol = "1"
 regex = "1"
-ureq = "2"
+ureq = { version = "2", features = ["json"] }
 url = "2"
 
 [dev-dependencies]

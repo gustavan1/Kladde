@@ -28,6 +28,7 @@ import {
 } from "lucide-react";
 import { CalendarLinks, ImportGuide } from "@/components/kladde/ImportExtras";
 import { WeeklyCard } from "@/components/kladde/StudyExtras";
+import { AiView, NoteAiTools, ProjectPlanner } from "@/components/kladde/AiExtras";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -36,7 +37,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { ApiError, apiDelete, apiGet, apiPatch, apiPost, errorDetail, exportBackup } from "@/lib/api";
 
 type Language = "da" | "en";
-type View = "overview" | "notes" | "homework" | "planner" | "imports";
+type View = "overview" | "notes" | "homework" | "planner" | "ai" | "imports";
 type Subject = { id: string; name: string; key: string; color: string };
 type Note = {
   id: string;
@@ -78,7 +79,8 @@ type Dashboard = {
   reminders: Task[];
 };
 type StudyPlan = { blocks: Block[]; summary: string };
-type NoteDraft = { title: string; content: string; subject: string; subject_key: string };
+// id is set when editing an existing note and missing for a new one.
+type NoteDraft = { id?: string; title: string; content: string; subject: string; subject_key: string };
 type TaskDraft = NoteDraft & {
   id?: string;
   deadline: string;
@@ -319,6 +321,7 @@ function Sidebar({
     ["notes", t.notes, BookOpen],
     ["homework", t.tasks, ListTodo],
     ["planner", t.plan, CalendarDays],
+    ["ai", lang === "da" ? "AI-hjælper" : "AI helper", Sparkles],
     ["imports", lang === "da" ? "Importér fra skole" : "School import", Upload],
   ];
   return (
@@ -517,6 +520,14 @@ function Header({
               </div>
             )}
           </div>
+          <button
+            onClick={() => setActive("ai")}
+            className="hidden size-9 place-items-center rounded-xl text-slate-400 hover:bg-blue-50 hover:text-blue-600 sm:grid"
+            title={lang === "da" ? "AI-hjælper" : "AI helper"}
+            data-testid="header-ai-button"
+          >
+            <Sparkles className="size-4" />
+          </button>
           <div className="relative flex items-center gap-2 border-l border-slate-200 pl-3">
             <button
               onClick={() => {
@@ -823,6 +834,7 @@ function Notes({
   refresh,
   startNew,
   onStarted,
+  openAi,
 }: {
   data?: Dashboard;
   lang: Language;
@@ -832,6 +844,7 @@ function Notes({
   refresh: () => void;
   startNew: boolean;
   onStarted: () => void;
+  openAi: () => void;
 }) {
   const t = text[lang];
   const da = lang === "da";
@@ -897,7 +910,7 @@ function Notes({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [startNew]);
   const submit = () => {
-    if (draft && draft.title.trim() && !save.isPending) save.mutate({ ...draft, id: selected?.id });
+    if (draft && draft.title.trim() && !save.isPending) save.mutate(draft);
   };
   return (
     <div className="space-y-6" data-testid="notes-view">
@@ -1027,7 +1040,7 @@ function Notes({
             <>
               <CardHeader className="flex flex-row items-center justify-between">
                 <CardTitle className="font-heading">
-                  {selected ? (da ? "Redigér note" : "Edit note") : t.newNote}
+                  {draft.id ? (da ? "Redigér note" : "Edit note") : t.newNote}
                 </CardTitle>
                 <button
                   onClick={() => setDraft(null)}
@@ -1047,7 +1060,7 @@ function Notes({
                 }}
               >
                 <Input
-                  autoFocus={!selected}
+                  autoFocus={!draft.id}
                   value={draft.title}
                   onChange={(e) => setDraft({ ...draft, title: e.target.value })}
                   placeholder={da ? "Titel på note" : "Note title"}
@@ -1067,6 +1080,20 @@ function Notes({
                   placeholder={t.placeholder}
                   className="min-h-[320px] rounded-xl leading-relaxed"
                   data-testid="note-editor-content-textarea"
+                />
+                <NoteAiTools
+                  lang={lang}
+                  mode="edit"
+                  title={draft.title}
+                  content={draft.content}
+                  subject={draft.subject}
+                  onSetup={openAi}
+                  onUse={(text, how) =>
+                    setDraft({
+                      ...draft,
+                      content: how === "replace" || !draft.content.trim() ? text : `${draft.content.trimEnd()}\n\n${text}`,
+                    })
+                  }
                 />
                 <div className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-100 pt-4">
                   <span className="text-xs text-slate-400">
@@ -1136,6 +1163,7 @@ function Notes({
                     variant="outline"
                     onClick={() =>
                       setDraft({
+                        id: selected.id,
                         title: selected.title,
                         content: selected.content,
                         subject: selected.subject,
@@ -1172,6 +1200,33 @@ function Notes({
                     <span className="text-slate-400">{da ? "Noten er tom." : "This note is empty."}</span>
                   )}
                 </div>
+                <div className="mt-6">
+                  <NoteAiTools
+                    key={selected.id}
+                    lang={lang}
+                    mode="view"
+                    title={selected.title}
+                    content={selected.content}
+                    subject={selected.subject}
+                    onSetup={openAi}
+                    onUse={(text, how) =>
+                      how === "new"
+                        ? save.mutate({
+                            title: `${selected.title} – AI`,
+                            content: text,
+                            subject: selected.subject,
+                            subject_key: selected.subject_key,
+                          })
+                        : save.mutate({
+                            id: selected.id,
+                            title: selected.title,
+                            content: `${selected.content.trimEnd()}\n\n${text}`,
+                            subject: selected.subject,
+                            subject_key: selected.subject_key,
+                          })
+                    }
+                  />
+                </div>
                 <p className="mt-8 border-t border-slate-100 pt-4 text-xs text-slate-400">
                   {da ? "Ændret" : "Edited"} {ageLabel(selected.updated_at, lang)}
                 </p>
@@ -1204,15 +1259,18 @@ function Homework({
   lang,
   search,
   refresh,
+  openAi,
 }: {
   data?: Dashboard;
   lang: Language;
   search: string;
   refresh: () => void;
+  openAi: () => void;
 }) {
   const t = text[lang];
   const da = lang === "da";
   const [draft, setDraft] = useState<TaskDraft | null>(null);
+  const [projectPlanner, setProjectPlanner] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [showDone, setShowDone] = useState(() => readStorage("kladde-show-done") !== "false");
   const formRef = useRef<HTMLDivElement>(null);
@@ -1294,10 +1352,32 @@ function Homework({
               : "See what matters today and what can wait."}
           </p>
         </div>
-        <Button onClick={start} className="bg-blue-600 hover:bg-blue-700" data-testid="new-task-btn">
-          <Plus className="size-4" /> {t.addTask}
-        </Button>
+        <div className="flex flex-wrap gap-2">
+          <Button
+            variant="outline"
+            onClick={() => {
+              setDraft(null);
+              setProjectPlanner(true);
+            }}
+            data-testid="project-planner-button"
+          >
+            <Sparkles className="size-4 text-blue-600" /> {da ? "Planlæg projekt med AI" : "Plan project with AI"}
+          </Button>
+          <Button onClick={start} className="bg-blue-600 hover:bg-blue-700" data-testid="new-task-btn">
+            <Plus className="size-4" /> {t.addTask}
+          </Button>
+        </div>
       </div>
+      {projectPlanner && (
+        <ProjectPlanner
+          lang={lang}
+          subjects={subjects}
+          today={today}
+          onClose={() => setProjectPlanner(false)}
+          onCreated={refresh}
+          onSetup={openAi}
+        />
+      )}
       {draft && (
         <div ref={formRef}>
           <Card className="border-blue-200 shadow-lg">
@@ -2129,18 +2209,18 @@ export default function Home() {
   }, [data?.subjects]);
   useEffect(() => {
     if (!selected && data?.notes[0]) setSelected(data.notes[0]);
-    // Keep the open note in sync after edits elsewhere; drop it if it was deleted.
+    // Keep the open note in sync after edits elsewhere. A note that is not in the list yet was
+    // just created (the list is refreshing), so it stays open; deleting clears the selection.
     if (selected && data) {
       const fresh = data.notes.find((n) => n.id === selected.id);
-      if (!fresh) setSelected(data.notes[0] ?? null);
-      else if (fresh.updated_at !== selected.updated_at || fresh.is_pinned !== selected.is_pinned)
+      if (fresh && (fresh.updated_at !== selected.updated_at || fresh.is_pinned !== selected.is_pinned))
         setSelected(fresh);
     }
   }, [data, selected]);
   // Typing in the search box from a page without a list jumps to the notes.
   const onSearch = (v: string) => {
     setSearch(v);
-    if (v && (active === "overview" || active === "planner" || active === "imports")) setActive("notes");
+    if (v && (active === "overview" || active === "planner" || active === "ai" || active === "imports")) setActive("notes");
   };
   const refresh = () => {
     void qc.invalidateQueries({ queryKey: ["dashboard"] });
@@ -2175,6 +2255,7 @@ export default function Home() {
               ["notes", lang === "da" ? "Noter" : "Notes"],
               ["homework", lang === "da" ? "Lektier" : "Homework"],
               ["planner", lang === "da" ? "Plan" : "Planner"],
+              ["ai", "AI"],
               ["imports", "Import"],
             ] as [View, string][]
           ).map(([id, label]) => (
@@ -2237,11 +2318,14 @@ export default function Home() {
               refresh={refresh}
               startNew={startNewNote}
               onStarted={() => setStartNewNote(false)}
+              openAi={() => setActive("ai")}
             />
           ) : active === "homework" ? (
-            <Homework data={data} lang={lang} search={search} refresh={refresh} />
+            <Homework data={data} lang={lang} search={search} refresh={refresh} openAi={() => setActive("ai")} />
           ) : active === "planner" ? (
             <Planner data={data} lang={lang} refresh={refresh} />
+          ) : active === "ai" ? (
+            <AiView lang={lang} subjects={data?.subjects || []} />
           ) : (
             <ImportCenter lang={lang} refresh={refresh} />
           )}
