@@ -49,18 +49,37 @@ jobs:
       - if: runner.os == 'macOS'
         run: bash scripts/prepare-mac.sh
       - run: cargo test --locked --manifest-path src-tauri/Cargo.toml
-      - run: npm run tauri -- build --target ${{ matrix.target }} --bundles ${{ matrix.bundle }}
+      - if: runner.os == 'Windows'
+        run: npm run tauri -- build --target ${{ matrix.target }} --bundles nsis
+      - name: Build the disk image
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -o pipefail
+          for attempt in 1 2 3; do
+            if npm run tauri -- build --target aarch64-apple-darwin --bundles dmg 2>&1 | tee "$RUNNER_TEMP/kladde-bundle.log"; then
+              break
+            fi
+            if [[ "$attempt" == 3 ]] || ! grep -q 'hdiutil: create failed - Resource busy' "$RUNNER_TEMP/kladde-bundle.log"; then
+              exit 1
+            fi
+            sleep 5
+          done
       - name: Verify the Mac bundle and its subscription connectors
         if: runner.os == 'macOS'
         shell: bash
         run: |
           root=src-tauri/target/aarch64-apple-darwin/release/bundle
-          app="$root/macos/Kladde.app"
+          image=("$root"/dmg/*.dmg)
+          hdiutil verify "${image[0]}"
+          mount=$(mktemp -d "$RUNNER_TEMP/kladde-image.XXXXXX")
+          hdiutil attach -readonly -nobrowse -mountpoint "$mount" "${image[0]}"
+          trap 'hdiutil detach "$mount"' EXIT
+          app="$mount/Kladde.app"
           codesign --verify --deep --strict "$app"
-          hdiutil verify "$root"/dmg/*.dmg
           exe="$app/Contents/MacOS/kladde"
           lipo -verify_arch arm64 "$exe"
-          export KLADDE_TEST_CODEX="$PWD/$app/Contents/MacOS/kladde-codex"
+          export KLADDE_TEST_CODEX="$app/Contents/MacOS/kladde-codex"
           "$KLADDE_TEST_CODEX" --version
           cargo test --locked --manifest-path src-tauri/Cargo.toml bundled_server_starts_without_credentials -- --ignored
           printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | "$exe" --kladde-mcp "$RUNNER_TEMP" | jq -e '.result.tools | map(.name) == ["read_shared_item","suggest_draft"]'
