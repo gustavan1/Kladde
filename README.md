@@ -43,6 +43,17 @@ You might see a blue box that says **"Windows protected your PC"**. This happens
 
 Some antivirus programs may also ask about it the first time; choose to allow it.
 
+### Is the download safe?
+
+- **Only download Kladde from the [releases page](https://github.com/gustavan1/Kladde/releases)** (or a file sent by the person who made it for you).
+- **To check that a file is genuine:**
+  1. Open PowerShell.
+  2. Run `Get-FileHash` on the file, for example `Get-FileHash .\Kladde_1.3.40_x64-setup.exe`.
+  3. Compare the result with the line for that file in `SHA256SUMS.txt` on the same release page.
+  - If they don't match, don't run the file.
+- **Updates are checked before they're installed:** Kladde only installs updates signed with the project's own key.
+- **More details:** see [SECURITY.md](SECURITY.md).
+
 ### 3. Your data, and how to back it up
 
 On a Mac, use **Finder → Go → Go to Folder** and enter `~/Library/Application Support/Kladde`. The study file is `kladde.json`. On Windows, the same file lives here.

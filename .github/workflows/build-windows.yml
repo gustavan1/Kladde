@@ -34,15 +34,15 @@ jobs:
             extension: dmg
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
           cache: npm
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
         with:
           targets: ${{ matrix.target }}
-      - uses: swatinem/rust-cache@v2
+      - uses: swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           workspaces: src-tauri -> target
       - run: npm ci
@@ -115,20 +115,39 @@ jobs:
           shopt -s nullglob
           for f in "$root"/nsis/*.exe.sig "$root"/macos/*.app.tar.gz "$root"/macos/*.app.tar.gz.sig; do cp "$f" out/; done
           ls -la out
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: Kladde-${{ matrix.target }}
           path: out/*
           if-no-files-found: error
 
+  security:
+    name: Check dependencies for known vulnerabilities
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+      - name: npm packages (fails on high or critical advisories)
+        run: npm audit --audit-level=high
+      - name: Rust crates (fails on known vulnerabilities, RustSec database)
+        run: |
+          cargo install cargo-audit --locked --quiet
+          # Fails on vulnerabilities; "unmaintained" and "unsound" notices are shown as warnings.
+          cargo audit --file src-tauri/Cargo.lock
+
   release:
-    needs: build
+    needs: [build, security]
     if: (github.ref == 'refs/heads/main' && github.event_name == 'push') || (github.event_name == 'workflow_dispatch' && inputs.publish_preview)
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      id-token: write # signs the build attestation
+      attestations: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: Kladde-*
           merge-multiple: true
@@ -151,6 +170,17 @@ jobs:
                "windows-x86_64": {signature: $win_sig, url: $win_url},
                "darwin-aarch64": {signature: $mac_sig, url: $mac_url}}}' > latest.json
           cat latest.json
+      - name: Checksums and a signed record of where the installers were built
+        run: |
+          cd installers
+          sha256sum *.exe *.dmg Kladde.app.tar.gz > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+      - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2
+        with:
+          subject-path: |
+            installers/*.exe
+            installers/*.dmg
+            installers/Kladde.app.tar.gz
       - name: Publish both downloads
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
