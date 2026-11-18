@@ -59,6 +59,20 @@ fn open_external(app: &AppHandle, url: &Url) {
     }
 }
 
+/// Opens an outside link (http, https or mailto) in the user's normal browser or mail app.
+/// The window calls this for every outside link, so it works the same in every web view.
+#[tauri::command]
+fn open_url(app: AppHandle, url: String) -> Result<(), String> {
+    let parsed = Url::parse(&url).map_err(|_| "Invalid link".to_string())?;
+    if !matches!(parsed.scheme(), "http" | "https" | "mailto") {
+        return Err("Only web and mail links can be opened".into());
+    }
+    app.opener().open_url(parsed.as_str(), None::<&str>).map_err(|e| {
+        log(&format!("Could not open {parsed}: {e}"));
+        e.to_string()
+    })
+}
+
 fn create_window(app: &AppHandle) -> tauri::Result<()> {
     let nav_app = app.clone();
     let popup_app = app.clone();
@@ -102,6 +116,9 @@ pub fn run() {
             }
         }))
         .plugin(tauri_plugin_dialog::init())
+        // Signed updates from the GitHub releases (see tauri.conf.json → plugins.updater).
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             let dir = data_dir(app.handle())?;
@@ -131,6 +148,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            open_url,
             commands::dashboard,
             commands::weekly_summary_cmd,
             commands::export_backup,

@@ -4,7 +4,7 @@ Kladde is a study app for notes, homework and a weekly study plan. It runs on Wi
 
 - Notes, homework and plans are saved on your computer. You can use them offline.
 - Optional AI uses Cloudflare Workers AI. On a Mac, you can also sign into ChatGPT for Codex or share selected work with Claude Desktop. See section 4.
-- **It only goes online when you use AI, or for a calendar link that you add yourself** under "Importér fra skole".
+- **It only goes online when you use AI, for a calendar link that you add yourself** under "Importér fra skole", **and to check for updates** (it asks GitHub whether a newer version exists; nothing about you is sent).
 - **Your data is one file** that you can back up and move to another computer.
 
 ---
@@ -88,7 +88,10 @@ Kladde uses the hosted `@cf/openai/gpt-oss-20b` model. Workers Free includes 10,
 
 ### Updating and uninstalling
 
-- **New version:** just run the new installer. Your data is kept.
+- **New version:** Kladde checks for updates a few seconds after it starts. When there's a new version, a blue bar says **"Kladde 1.3.x er klar"**. Click **Opdatér og genstart**: Kladde downloads the update, installs it and opens again. Your notes and homework are not touched.
+  - You can also click **Søg efter opdateringer** at the bottom of the window.
+  - Nothing is installed until you click. Each update is signed, and Kladde only installs updates with the right signature.
+  - Versions older than 1.3 can't update themselves: install 1.3 (or newer) by hand once, and after that it updates itself. You can also always install a new version by downloading it and running the installer. Your data is kept either way.
 - **Uninstall:** open **Settings → Apps → Installed apps → Kladde → Uninstall**.
   - The uninstaller may offer to "delete the application data". That only removes small window settings such as language and your name.
   - Your notes in `%APPDATA%\Kladde` are kept. If you want to remove them too, delete that folder yourself.
@@ -102,7 +105,19 @@ Kladde uses the hosted `@cf/openai/gpt-oss-20b` model. Workers Free includes 10,
 
 ## For the developer: making a new installer
 
-The **Build Kladde installers** GitHub Actions workflow builds a Windows x64 NSIS installer and an Apple Silicon DMG. Pull requests produce downloadable artifacts. A successful push to `main` publishes both installers as release assets. To share an unmerged build, run the workflow for its branch and select **Publish these installers as a prerelease**. You can download the Windows file and send it to your friend if they do not have access to the private repository.
+The **Build Kladde installers** GitHub Actions workflow builds a Windows x64 NSIS installer and an Apple Silicon DMG. Pull requests produce downloadable artifacts. A successful push to `main` publishes both installers as release assets. To share an unmerged build, run the workflow for its branch and select **Publish these installers as a prerelease**.
+
+**Updates reach installed copies automatically.**
+
+- Every push to `main` makes a release with a new version number: 1.3.&lt;build number&gt;. The minor version comes from `src-tauri/tauri.conf.json`, so raise it there for bigger releases (for example to 1.4.0).
+- The release includes `latest.json`, which installed copies read through `https://github.com/gustavan1/Kladde/releases/latest/download/latest.json`. They then offer the update.
+- Previews (prereleases) are never offered as updates.
+
+**Signing key.** Updates are signed with the key in the repository secret `TAURI_SIGNING_PRIVATE_KEY`. The matching public key is in `tauri.conf.json`.
+
+- Keep a backup of the private key file somewhere safe, for example a password manager.
+- If it's lost, installed copies can't verify new updates. You'd then need a new key pair, and everyone would install once by hand.
+- Never commit the private key.
 
 ### Working on the code
 
