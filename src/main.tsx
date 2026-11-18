@@ -7,7 +7,10 @@ import "@fontsource-variable/geist";
 import "@fontsource-variable/outfit";
 import "./index.css";
 import App from "./App.tsx";
+import { routeOutsideLinks } from "./lib/outsideLinks";
 import { queryClient } from "./lib/queryClient";
+
+routeOutsideLinks();
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>

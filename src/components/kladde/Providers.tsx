@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
+import { ExternalLink } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { apiGet, apiPost, apiDelete, errorDetail } from "@/lib/api";
@@ -22,15 +23,22 @@ export const useAiStatus = () =>
     staleTime: Infinity,
   });
 
-function Link({ url, children }: { url: string; children: string }) {
+/** An outside link. "button" is a clear blue button for the main step; "text" is a guide link. */
+function Link({ url, children, button = false }: { url: string; children: string; button?: boolean }) {
   return (
     <a
-      className="text-blue-700 underline"
+      className={
+        button
+          ? "inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white no-underline hover:bg-blue-700"
+          : "inline-flex items-center gap-1 text-blue-700 underline underline-offset-2 hover:text-blue-900"
+      }
       href={url}
       target="_blank"
       rel="noreferrer"
+      data-testid="outside-link"
     >
       {children}
+      <ExternalLink className="size-3.5" aria-hidden />
     </a>
   );
 }
@@ -71,42 +79,55 @@ export function AiSetup({ lang }: { lang: Language }) {
         <summary className="cursor-pointer font-medium">
           {da ? "Opsæt din gratis konto" : "Set up your free account"}
         </summary>
-        <ol className="mt-3 list-decimal space-y-2 pl-6 text-slate-700">
-          <li>
-            <Link url="https://dash.cloudflare.com/sign-up">
-              {da ? "Opret en Cloudflare-konto" : "Create a Cloudflare account"}
-            </Link>
-            {da
-              ? ", bekræft din e-mail, og vælg den gratis plan. Du behøver hverken et domæne eller en Worker."
-              : ", verify your email and stay on the free plan. You can skip adding a domain or deploying a Worker."}
-          </li>
-          <li>
-            <Link url="https://dash.cloudflare.com/">
-              {da ? "Åbn dashboardet" : "Open the dashboard"}
-            </Link>
-            {da
-              ? " og kopiér Account ID for din konto. "
-              : " and copy your Account ID. "}
-            <Link url="https://developers.cloudflare.com/fundamentals/account/find-account-and-zone-ids/">
-              {da ? "Find dit Account ID" : "Find your Account ID"}
-            </Link>
-          </li>
-          <li>
-            {da
-              ? "Åbn Workers AI i dashboardet. Vælg “Use REST API” og “Create a Workers AI API Token”. Vælg din konto og opret tokenet. "
-              : "Open Workers AI in the dashboard. Choose “Use REST API” and “Create a Workers AI API Token”. Select your account and create the token. "}
-            <Link url="https://developers.cloudflare.com/workers-ai/get-started/rest-api/">
+        <ol className="mt-3 list-decimal space-y-4 pl-6 text-slate-700">
+          <li className="space-y-2">
+            <p>
               {da
-                ? "Cloudflares trin-for-trin-guide"
-                : "Cloudflare’s walkthrough"}
+                ? "Opret en gratis Cloudflare-konto og bekræft din e-mail. Bliv på den gratis plan – du behøver hverken et domæne eller en Worker."
+                : "Create a free Cloudflare account and verify your email. Stay on the free plan – you don't need a domain or a Worker."}
+            </p>
+            <Link button url="https://dash.cloudflare.com/sign-up">
+              {da ? "Opret Cloudflare-konto" : "Create Cloudflare account"}
             </Link>
           </li>
-          <li>
-            {da
-              ? "Hvis du opretter tokenet manuelt, så vælg din konto og Workers AI Read og Edit. Kopiér tokenet, mens det vises, og indsæt det nedenfor. "
-              : "For a custom token, scope it to your account with Workers AI Read and Edit. Copy the token while it is visible and paste it below. "}
+          <li className="space-y-2">
+            <p>
+              {da
+                ? "Åbn dashboardet og kopiér dit Account ID (32 tegn). Det står under kontonavnet, eller i adresselinjen efter dash.cloudflare.com/."
+                : "Open the dashboard and copy your Account ID (32 characters). It is shown under the account name, or in the address bar after dash.cloudflare.com/."}
+            </p>
+            <div className="flex flex-wrap items-center gap-3">
+              <Link button url="https://dash.cloudflare.com/">
+                {da ? "Åbn Cloudflare-dashboardet" : "Open the Cloudflare dashboard"}
+              </Link>
+              <Link url="https://developers.cloudflare.com/fundamentals/account/find-account-and-zone-ids/">
+                {da ? "Hvor finder jeg Account ID?" : "Where is my Account ID?"}
+              </Link>
+            </div>
+          </li>
+          <li className="space-y-2">
+            <p>
+              {da
+                ? "Åbn Workers AI, vælg “Use REST API” og derefter “Create a Workers AI API Token”. Vælg din konto, opret tokenet, og kopiér det, mens det vises."
+                : "Open Workers AI, choose “Use REST API” and then “Create a Workers AI API Token”. Select your account, create the token and copy it while it is shown."}
+            </p>
+            <div className="flex flex-wrap items-center gap-3">
+              <Link button url="https://dash.cloudflare.com/?to=/:account/ai/workers-ai">
+                {da ? "Åbn Workers AI" : "Open Workers AI"}
+              </Link>
+              <Link url="https://developers.cloudflare.com/workers-ai/get-started/rest-api/">
+                {da ? "Cloudflares trin-for-trin-guide" : "Cloudflare’s walkthrough"}
+              </Link>
+            </div>
+          </li>
+          <li className="space-y-2">
+            <p>
+              {da
+                ? "Laver du tokenet selv under API Tokens, så giv det adgang til din konto med Workers AI Read og Edit. Indsæt Account ID og token herunder."
+                : "If you create the token yourself under API Tokens, give it access to your account with Workers AI Read and Edit. Paste the Account ID and token below."}
+            </p>
             <Link url="https://dash.cloudflare.com/profile/api-tokens">
-              {da ? "Administrer tokens" : "Manage tokens"}
+              {da ? "Administrer API-tokens" : "Manage API tokens"}
             </Link>
           </li>
         </ol>

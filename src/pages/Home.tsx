@@ -29,6 +29,7 @@ import {
 import { CalendarLinks, ImportGuide } from "@/components/kladde/ImportExtras";
 import { WeeklyCard } from "@/components/kladde/StudyExtras";
 import { AiView, NoteAiTools, ProjectPlanner } from "@/components/kladde/AiExtras";
+import { CheckForUpdates, UpdateBanner } from "@/components/kladde/Updater";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -2311,6 +2312,7 @@ export default function Home() {
           ))}
         </nav>
         <main className="mx-auto w-full max-w-[1500px] flex-1 p-4 sm:p-6 lg:p-8">
+          <UpdateBanner lang={lang} />
           {dashboard.isError && (
             <div
               className="mb-5 flex items-center gap-3 rounded-xl border border-amber-100 bg-amber-50 p-4 text-sm text-amber-700"
@@ -2400,6 +2402,7 @@ export default function Home() {
             <Download className="size-3.5" />
             {lang === "da" ? "Gem backup" : "Save backup"}
           </button>
+          <CheckForUpdates lang={lang} />
         </footer>
       </div>
     </div>
