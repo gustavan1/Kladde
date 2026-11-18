@@ -1,0 +1,19 @@
+# Dependencies and build output
+node_modules/
+dist/
+src-tauri/target/
+src-tauri/gen/
+*.tsbuildinfo
+
+# Data files and backups (never commit personal data)
+kladde.json
+kladde.json.tmp
+kladde-backup-*.json
+data/
+*.log
+
+# Editors and OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
