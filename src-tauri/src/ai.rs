@@ -1,4 +1,4 @@
-//! AI features through the Google Gemini API (free tier works).
+//! AI features through the Google Gemini API.
 //!
 //! The API key is kept in settings.json next to kladde.json, never inside kladde.json, so it
 //! is not part of backups. Nothing is sent to Google unless the user uses an AI feature.
@@ -43,8 +43,9 @@ impl AiState {
     }
 
     fn save(&self, s: AiSettings) -> Result<(), String> {
+        let mut settings = self.settings.lock().unwrap_or_else(|p| p.into_inner());
         write_settings(&self.path, &s)?;
-        *self.settings.lock().unwrap_or_else(|p| p.into_inner()) = s;
+        *settings = s;
         Ok(())
     }
 }
@@ -56,12 +57,15 @@ fn write_settings(path: &Path, s: &AiSettings) -> Result<(), String> {
 }
 
 fn base_url() -> String {
-    // Only the automated tests point this somewhere else.
-    std::env::var("KLADDE_GEMINI_BASE_URL").unwrap_or_else(|_| "https://generativelanguage.googleapis.com".into())
+    #[cfg(debug_assertions)]
+    if let Ok(url) = std::env::var("KLADDE_GEMINI_BASE_URL") {
+        return url;
+    }
+    "https://generativelanguage.googleapis.com".into()
 }
 
 fn agent() -> ureq::Agent {
-    ureq::AgentBuilder::new().timeout(Duration::from_secs(90)).user_agent("Kladde").build()
+    ureq::AgentBuilder::new().redirects(0).timeout(Duration::from_secs(90)).user_agent("Kladde").build()
 }
 
 /// Turns a failed Gemini request into a friendly message (never containing the key).
@@ -73,8 +77,8 @@ pub fn gemini_error(status: Option<u16>, body: &str, lang: &Option<String>) -> A
         }
         Some(401) | Some(403) => (401, "API-nøglen har ikke adgang til Gemini. Lav en ny nøgle i Google AI Studio.", "The API key has no access to Gemini. Create a new key in Google AI Studio."),
         Some(404) => (404, "AI-modellen findes ikke længere. Vælg en anden model i AI-indstillinger.", "The AI model no longer exists. Choose another model in AI settings."),
-        Some(429) => (429, "Gratis-grænsen hos Google er nået lige nu. Vent et minut (eller til i morgen) og prøv igen.", "Google's free limit has been reached for now. Wait a minute (or until tomorrow) and try again."),
-        Some(400) if lower.contains("location") || lower.contains("region") => (400, "Gemini er ikke tilgængelig i dit land med den gratis nøgle.", "Gemini is not available in your country with the free key."),
+        Some(429) => (429, "Googles kvote er nået. Tjek projektets grænser i AI Studio.", "Google's quota has been reached. Check the project limits in AI Studio."),
+        Some(400) if lower.contains("location") || lower.contains("region") => (400, "Gemini er ikke tilgængelig i dit land med denne nøgle.", "Gemini is not available in your country with this key."),
         Some(400) => (400, "Gemini kunne ikke bruge forespørgslen. Prøv med en kortere tekst.", "Gemini could not use the request. Try a shorter text."),
         Some(s) if s >= 500 => (503, "Gemini er overbelastet lige nu. Prøv igen om lidt.", "Gemini is overloaded right now. Try again in a moment."),
         Some(_) => (502, "Gemini svarede med en fejl. Prøv igen.", "Gemini answered with an error. Try again."),
@@ -151,6 +155,8 @@ pub fn choose_models(list: &Value) -> (Vec<String>, Option<String>) {
         .find(|n| n.contains("flash") && !n.contains("lite") && !unstable(n))
         .or_else(|| models.iter().find(|n| n.contains("flash") && !unstable(n)))
         .or_else(|| models.iter().find(|n| n.contains("flash")))
+        .or_else(|| models.iter().find(|n| !unstable(n)))
+        .or_else(|| models.first())
         .cloned();
     (models, best)
 }
@@ -178,7 +184,7 @@ fn ai_state(app: &AppHandle) -> tauri::State<'_, AiState> {
 fn need_key(app: &AppHandle, lang: &Option<String>) -> Res<AiSettings> {
     let s = ai_state(app).get();
     if s.gemini_api_key.trim().is_empty() {
-        return Err(err(428, tr(lang, "AI er ikke sat op endnu. Indsæt din gratis Gemini-nøgle under AI-hjælper.", "AI is not set up yet. Add your free Gemini key under AI helper.")));
+        return Err(err(428, tr(lang, "AI er ikke sat op endnu. Indsæt din Gemini-nøgle under AI-hjælper.", "AI is not set up yet. Add your Gemini key under AI helper.")));
     }
     Ok(s)
 }
@@ -205,7 +211,8 @@ pub async fn ai_save_key(app: AppHandle, lang: Option<String>, body: Value) -> R
     let k = key.clone();
     let list = blocking(move || list_models(&k, &l)).await?;
     let (models, best) = choose_models(&list);
-    let settings = AiSettings { gemini_api_key: key, gemini_model: best.unwrap_or_else(|| DEFAULT_MODEL.into()) };
+    let model = best.ok_or_else(|| err(422, tr(&lang, "Google viste ingen kompatibel tekstmodel til nøglen.", "Google listed no compatible text model for this key.")))?;
+    let settings = AiSettings { gemini_api_key: key, gemini_model: model };
     ai_state(&app).save(settings.clone())?;
     Ok(status_json(&settings, Some(models)))
 }
@@ -260,7 +267,10 @@ pub async fn ai_note(app: AppHandle, lang: Option<String>, body: Value) -> Res<V
     let Some(task) = note_prompt(&action, is_da(&lang)) else {
         return Err(err(400, "Unknown action"));
     };
-    let content = str_of(body.get("content"), 60_000);
+    let content = body["content"].as_str().unwrap_or("");
+    if content.chars().count() > 60_000 {
+        return Err(err(400, tr(&lang, "AI kan behandle op til 60.000 tegn ad gangen.", "AI can process up to 60,000 characters at a time.")));
+    }
     if content.trim().len() < 20 {
         return Err(err(400, tr(&lang, "Skriv eller indsæt lidt mere tekst først.", "Write or paste a bit more text first.")));
     }
@@ -385,8 +395,7 @@ pub fn chat_context(d: &Data, subject: &str, today: &str) -> String {
     }
     let soon = add_days(today, 7);
     let done_soon = d.tasks.iter().filter(|t| t.status == "done" && t.deadline.as_str() >= today && t.deadline <= soon).count();
-    out += &format!("({done_soon} tasks due this coming week are already done.)\n\nNote titles: ");
-    out += &d.notes.iter().take(60).map(|n| format!("{} [{}]", n.title, n.subject)).collect::<Vec<_>>().join("; ");
+    out += &format!("({done_soon} tasks due this coming week are already done.)\n");
     if subject != "Generelt" && !subject.is_empty() {
         let notes: String = d
             .notes
@@ -412,9 +421,10 @@ pub fn ai_messages(state: tauri::State<'_, AppState>) -> Res<Vec<ChatMessage>> {
 
 #[tauri::command]
 pub fn ai_clear_chat(state: tauri::State<'_, AppState>) -> Res<Value> {
-    let mut store = state.store.lock().unwrap_or_else(|p| p.into_inner());
+    let mut guard = state.store.lock().unwrap_or_else(|p| p.into_inner());
+    let mut store = guard.transaction();
     store.data.messages.clear();
-    store.save()?;
+    store.commit()?;
     Ok(json!({ "deleted": true }))
 }
 
@@ -436,7 +446,7 @@ pub async fn ai_chat(app: AppHandle, lang: Option<String>, body: Value) -> Res<C
         let system = format!("{TUTOR}\n- {PLAIN_TEXT}\n\n{}", chat_context(&store.data, &subject, &today));
         let mut contents: Vec<Value> = vec![];
         let history = &store.data.messages;
-        for m in history.iter().skip(history.len().saturating_sub(20)) {
+        for m in history.iter().skip(history.len().saturating_sub(20)).filter(|m| m.subject == subject) {
             if contents.is_empty() && m.role != "user" {
                 continue;
             }
@@ -449,7 +459,8 @@ pub async fn ai_chat(app: AppHandle, lang: Option<String>, body: Value) -> Res<C
     let l = lang.clone();
     let answer = blocking(move || generate(&s, &system, contents, None, &l)).await?;
     let state = app.state::<AppState>();
-    let mut store = state.store.lock().unwrap_or_else(|p| p.into_inner());
+    let mut guard = state.store.lock().unwrap_or_else(|p| p.into_inner());
+    let mut store = guard.transaction();
     store.data.messages.push(ChatMessage { id: new_id(), role: "user".into(), content: prompt, subject: subject.clone(), created_at: now_iso() });
     let reply = ChatMessage { id: new_id(), role: "assistant".into(), content: answer, subject, created_at: now_iso() };
     store.data.messages.push(reply.clone());
@@ -457,7 +468,7 @@ pub async fn ai_chat(app: AppHandle, lang: Option<String>, body: Value) -> Res<C
     if len > 200 {
         store.data.messages.drain(..len - 200);
     }
-    store.save()?;
+    store.commit()?;
     Ok(reply)
 }
 
@@ -484,6 +495,8 @@ mod tests {
         let (_, best) = choose_models(&json!({ "models": [{ "name": "models/gemini-3.1-flash", "supportedGenerationMethods": ["generateContent"] }, { "name": "models/gemini-2.5-flash", "supportedGenerationMethods": ["generateContent"] }] }));
         assert_eq!(best.as_deref(), Some("gemini-3.1-flash"));
         assert_eq!(choose_models(&json!({})).1, None);
+        let pro_only = json!({ "models": [{"name": "models/gemini-3-pro", "supportedGenerationMethods": ["generateContent"]}] });
+        assert_eq!(choose_models(&pro_only).1.as_deref(), Some("gemini-3-pro"));
     }
 
     #[test]
@@ -496,7 +509,7 @@ mod tests {
         assert_eq!(response_text(&json!({ "candidates": [] }), &da).unwrap_err().status, 502);
         assert!(gemini_error(Some(400), "API key not valid. Please pass a valid API key.", &da).detail.contains("API-nøglen virker ikke"));
         assert_eq!(gemini_error(Some(429), "RESOURCE_EXHAUSTED", &da).status, 429);
-        assert!(gemini_error(Some(429), "", &Some("en".into())).detail.contains("free limit"));
+        assert!(gemini_error(Some(429), "", &Some("en".into())).detail.contains("quota"));
         assert_eq!(gemini_error(None, "", &da).status, 503);
         assert_eq!(gemini_error(Some(503), "", &da).status, 503);
     }
@@ -532,7 +545,8 @@ mod tests {
         let general = chat_context(&d, "Generelt", "2026-11-18");
         assert!(general.contains("- Essay (Engelsk) due 2026-11-17, OVERDUE"));
         assert!(!general.contains("Færdig ("));
-        assert!(general.contains("Fotosyntese [Biologi]"));
+        assert!(!general.contains("Fotosyntese"));
+        assert!(!chat_context(&d, "Dansk", "2026-11-18").contains("Fotosyntese"));
         assert!(!general.contains("Lys + CO2"));
         assert!(chat_context(&d, "Biologi", "2026-11-18").contains("Lys + CO2"));
     }

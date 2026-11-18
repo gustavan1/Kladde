@@ -29,6 +29,21 @@ struct PlanDay {
     date: String,
     slots: Vec<&'static str>,
     minutes: i64,
+    busy: Vec<(i64, i64)>,
+}
+
+fn minute_of_day(time: &str) -> Option<i64> {
+    let (h, m) = time.split_once(':')?;
+    Some(h.parse::<i64>().ok()? * 60 + m.parse::<i64>().ok()?)
+}
+
+impl PlanDay {
+    fn free_slot(&self, duration: i64) -> Option<usize> {
+        self.slots.iter().position(|time| {
+            let start = minute_of_day(time).expect("fixed planner slot");
+            self.busy.iter().all(|&(a, b)| start + duration <= a || start >= b)
+        })
+    }
 }
 
 /// Returns None when there are no open deadlines in the next 14 days.
@@ -54,7 +69,14 @@ pub fn make_study_plan(data: &Data, da: bool, now: &DateTime<Local>) -> Option<S
         }
         let slots: Vec<&str> = SLOTS.iter().copied().filter(|s| i > 0 || *s > now_time.as_str()).collect();
         if !slots.is_empty() {
-            days.push(PlanDay { date, slots, minutes: 0 });
+            let weekday = day_name(&date).expect("generated date");
+            let busy = data.blocks.iter()
+                .filter(|block| block.day == weekday && block.source.as_deref() != Some("plan"))
+                .filter_map(|block| {
+                    let start = minute_of_day(&block.time)?;
+                    Some((start, start.saturating_add(block.minutes.unwrap_or(MAX_BLOCK).max(1))))
+                }).collect();
+            days.push(PlanDay { date, slots, minutes: 0, busy });
         }
     }
 
@@ -62,29 +84,25 @@ pub fn make_study_plan(data: &Data, da: bool, now: &DateTime<Local>) -> Option<S
     let mut unplanned = 0;
     let mut planned: Vec<&str> = vec![];
     for task in open {
-        // Work happens before the deadline day (or on it, if it is today or overdue).
-        let last_day = if task.deadline <= today { today.clone() } else { add_days(&task.deadline, -1) };
-        let mut usable: Vec<usize> = (0..days.len()).filter(|&i| days[i].date <= last_day).collect();
-        if usable.is_empty() && !days.is_empty() {
-            usable = vec![0];
-        }
+        let last_day = if task.deadline == today { today.clone() } else { add_days(&task.deadline, -1) };
+        let usable: Vec<usize> = (0..days.len()).filter(|&i| days[i].date <= last_day).collect();
         // Far-off deadlines: plan half the work this week, the rest when the plan is remade.
         let beyond_window = task.deadline > add_days(&today, WINDOW_DAYS);
         let estimate = if beyond_window { (task.estimated_minutes + 1) / 2 } else { task.estimated_minutes };
         let mut remaining = estimate.max(15);
         while remaining > 0 {
+            let minutes = MAX_BLOCK.min(remaining);
             let best = usable
                 .iter()
                 .copied()
-                .filter(|&i| !days[i].slots.is_empty())
-                .min_by(|&a, &b| days[a].minutes.cmp(&days[b].minutes).then(days[a].date.cmp(&days[b].date)));
-            let Some(i) = best else {
+                .filter_map(|i| days[i].free_slot(minutes).map(|slot| (i, slot)))
+                .min_by(|&(a, _), &(b, _)| days[a].minutes.cmp(&days[b].minutes).then(days[a].date.cmp(&days[b].date)));
+            let Some((i, slot)) = best else {
                 unplanned += remaining;
                 break;
             };
-            let minutes = MAX_BLOCK.min(remaining);
             let day = &mut days[i];
-            let time = day.slots.remove(0);
+            let time = day.slots.remove(slot);
             day.minutes += minutes;
             remaining -= minutes;
             if !planned.contains(&task.id.as_str()) {
@@ -107,7 +125,7 @@ pub fn make_study_plan(data: &Data, da: bool, now: &DateTime<Local>) -> Option<S
     let total: i64 = blocks.iter().map(|b| b.minutes.unwrap_or(0)).sum();
     let (h, m) = (total / 60, total % 60);
     let hours = if h > 0 { format!("{h} {} ", if da { "t" } else { "h" }) } else { String::new() };
-    let mins = if m > 0 { format!("{m} min") } else { String::new() };
+    let mins = if m > 0 || h == 0 { format!("{m} min") } else { String::new() };
     let time = format!("{hours}{mins}").trim().to_string();
     let mut summary = if da {
         format!("{} fokusblokke · {time} til {} opgaver", blocks.len(), planned.len())
@@ -223,11 +241,21 @@ mod tests {
     }
 
     #[test]
-    fn evening_overdue_and_minimum_15_minutes() {
-        // 19:30 on Wednesday: no slots left today, so overdue work goes to the next day.
-        let d = data(vec![task("Gammel", "2026-11-16", 10, "high", "todo")]);
-        let plan = make_study_plan(&d, true, &at(2026, 11, 18, 19, 30)).unwrap();
-        assert_eq!(summary(&plan), [row("Gammel", "Torsdag", "15:30", 15)]);
+    fn weekend_deadline_without_remaining_slots_is_reported() {
+        let d = data(vec![task("Essay", "2026-11-22", 45, "high", "todo")]);
+        let plan = make_study_plan(&d, false, &at(2026, 11, 20, 19, 30)).unwrap();
+        assert!(plan.blocks.is_empty());
+        assert!(plan.summary.contains("45 min did not fit"));
+    }
+
+    #[test]
+    fn avoids_partial_overlaps_and_reuses_previous_plan_slots() {
+        let mut d = data(vec![task("Essay", "2026-11-19", 45, "high", "todo")]);
+        for (source, time) in [("manual", "16:00"), ("feed:f", "17:15"), ("plan", "19:00")] {
+            d.blocks.push(Block { day: "Onsdag".into(), time: time.into(), minutes: Some(60), source: Some(source.into()), ..Default::default() });
+        }
+        let plan = make_study_plan(&d, false, &at(2026, 11, 18, 14, 0)).unwrap();
+        assert_eq!(plan.blocks[0].time, "19:00");
     }
 
     #[test]

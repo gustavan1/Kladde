@@ -7,7 +7,7 @@
 
 use std::sync::LazyLock;
 
-use chrono::{Local, TimeZone, Utc};
+use chrono::{Local, TimeZone};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -330,7 +330,7 @@ impl Record {
     }
 }
 
-fn make_item(source: &str, rec: Record, date_is_deadline: bool) -> Option<ImportItem> {
+fn make_item(source: &str, rec: Record, date_is_deadline: bool, estimate_header: &str) -> Option<ImportItem> {
     let title = rec.title.as_deref().unwrap_or("").trim().to_string();
     if title.is_empty() {
         return None;
@@ -365,7 +365,7 @@ fn make_item(source: &str, rec: Record, date_is_deadline: bool) -> Option<Import
         day = date.as_deref().and_then(day_name).map(String::from);
     }
 
-    // Lectio "Elevtid" is in hours ("2,50"); small numbers are hours, bigger ones minutes.
+    // Explicit minutes/hours use their column unit. Keep the legacy heuristic for Lectio Elevtid.
     let est_text: String = rec
         .estimate
         .as_deref()
@@ -376,7 +376,8 @@ fn make_item(source: &str, rec: Record, date_is_deadline: bool) -> Option<Import
         .collect();
     let num: f64 = if est_text.is_empty() { 0.0 } else { est_text.parse().unwrap_or(0.0) };
     let estimated_minutes = (num > 0.0).then(|| {
-        if num <= 12.0 {
+        let unit = estimate_header.to_lowercase();
+        if unit.contains("timer") || (unit.contains("elevtid") && num <= 12.0) {
             js_round(num * 60.0)
         } else {
             js_round(num)
@@ -451,7 +452,7 @@ pub fn parse_import(source: &str, content: &str, da: bool) -> Result<ImportPrevi
                 .get(&Field::Date)
                 .is_some_and(|&i| DEADLINE_HEADER.is_match(&keys[i]));
             let rec = Record::from(|f| cols.get(&f).map(|&i| json_text(&obj[&keys[i]])));
-            if let Some(item) = make_item(source, rec, date_is_deadline) {
+            if let Some(item) = make_item(source, rec, date_is_deadline, cols.get(&Field::Estimate).map_or("", |&i| keys[i].as_str())) {
                 items.push(item);
             }
         }
@@ -494,10 +495,11 @@ pub fn parse_import(source: &str, content: &str, da: bool) -> Result<ImportPrevi
         let date_is_deadline = cols
             .get(&Field::Date)
             .is_some_and(|&i| DEADLINE_HEADER.is_match(&header[i]));
+        let estimate_header = cols.get(&Field::Estimate).map_or("", |&i| header[i].as_str());
         let mut skipped = 0;
         for r in rows.iter().skip(header_idx + 1) {
             let rec = Record::from(|f| cols.get(&f).and_then(|&i| r.get(i).cloned()));
-            match make_item(source, rec, date_is_deadline) {
+            match make_item(source, rec, date_is_deadline, estimate_header) {
                 Some(item) => items.push(item),
                 None => skipped += 1,
             }
@@ -540,6 +542,7 @@ static DEADLINE_HEADER: LazyLock<Regex> = LazyLock::new(|| re(r"(?i)frist|deadli
 #[derive(Clone, Debug, PartialEq)]
 pub struct IcsEvent {
     pub uid: String,
+    pub recurrence_id: Option<String>,
     pub summary: String,
     pub description: String,
     pub date: String,
@@ -579,68 +582,123 @@ fn is_date_only_param(params: &str) -> bool {
     params.match_indices("VALUE=DATE").any(|(i, m)| !params[i + m.len()..].starts_with('-'))
 }
 
-struct IcsDate {
-    date: String,
-    time: Option<String>,
-    all_day: bool,
+#[derive(Clone, Copy)]
+struct Property<'a> {
+    name: &'a str,
+    params: &'a str,
+    value: &'a str,
 }
 
-fn parse_ics_date(value: &str, params: &str) -> Option<IcsDate> {
-    let m = ICS_DATE.captures(value)?;
-    let (y, mo, d) = (&m[1], &m[2], &m[3]);
-    if m.get(4).is_none() || is_date_only_param(params) {
-        return Some(IcsDate { date: format!("{y}-{mo}-{d}"), time: None, all_day: true });
+impl Property<'_> {
+    fn all_day(self) -> bool {
+        !self.value.contains('T') || is_date_only_param(self.params)
     }
-    let (h, mi) = (&m[4], &m[5]);
-    if m.get(7).is_some() {
-        // UTC time -> this computer's local time.
-        let utc = Utc
-            .with_ymd_and_hms(y.parse().ok()?, mo.parse().ok()?, d.parse().ok()?, h.parse().ok()?, mi.parse().ok()?, 0)
-            .single()?;
-        let local = utc.with_timezone(&Local);
-        return Some(IcsDate { date: local_date(&local), time: Some(local.format("%H:%M").to_string()), all_day: false });
+
+    fn datetime(self) -> Option<chrono::DateTime<rrule::Tz>> {
+        let m = ICS_DATE.captures(self.value)?;
+        let date = chrono::NaiveDate::from_ymd_opt(m[1].parse().ok()?, m[2].parse().ok()?, m[3].parse().ok()?)?;
+        let time = |i| m.get(i).map_or(Some(0), |v| v.as_str().parse::<u32>().ok());
+        let (h, min, sec) = if self.all_day() { (0, 0, 0) } else { (time(4)?, time(5)?, time(6)?) };
+        let tz = if self.value.ends_with('Z') {
+            rrule::Tz::UTC
+        } else if let Some(id) = self.params.split(';').find_map(|p| p.strip_prefix("TZID=")) {
+            rrule::Tz::Tz(id.trim_matches('"').parse().ok()?)
+        } else {
+            rrule::Tz::LOCAL
+        };
+        tz.from_local_datetime(&date.and_hms_opt(h, min, sec)?).earliest()
     }
-    Some(IcsDate { date: format!("{y}-{mo}-{d}"), time: Some(format!("{h}:{mi}")), all_day: false })
 }
 
-pub fn parse_ics(text: &str) -> Vec<IcsEvent> {
+fn occurrence_key(start: chrono::DateTime<rrule::Tz>, all_day: bool) -> String {
+    if all_day { start.date_naive().to_string() } else { start.timestamp().to_string() }
+}
+
+pub fn parse_ics(text: &str, today: chrono::NaiveDate) -> Result<Vec<IcsEvent>, String> {
+    use chrono::Duration;
+    use std::collections::HashSet;
+
     let unfolded = text.replace("\r\n", "\n").replace('\r', "\n").replace("\n ", "").replace("\n\t", "");
     let mut events = vec![];
-    let mut cur: Option<std::collections::HashMap<String, (String, String)>> = None;
-    for line in unfolded.split('\n') {
-        if line == "BEGIN:VEVENT" {
-            cur = Some(Default::default());
-        } else if line == "END:VEVENT" {
-            if let Some(ev) = cur.take() {
-                let start = ev.get("DTSTART").and_then(|(v, p)| parse_ics_date(v, p));
-                let end = ev.get("DTEND").and_then(|(v, p)| parse_ics_date(v, p));
-                if let (Some(start), Some((summary, _))) = (start, ev.get("SUMMARY")) {
-                    let uid = match ev.get("UID") {
-                        Some((u, _)) if !u.is_empty() => u.clone(),
-                        _ => ext_id(&[Some(summary), Some(&start.date), start.time.as_deref()]),
-                    };
-                    events.push(IcsEvent {
-                        uid,
-                        summary: unescape_ics(summary).trim().to_string(),
-                        description: unescape_ics(ev.get("DESCRIPTION").map(|(v, _)| v.as_str()).unwrap_or(""))
-                            .trim()
-                            .to_string(),
-                        date: start.date,
-                        time: start.time,
-                        end_time: end.filter(|e| !e.all_day).and_then(|e| e.time),
-                        all_day: start.all_day,
-                    });
+    let mut overrides = HashSet::new();
+    let mut instances = vec![];
+    for component in unfolded.split("BEGIN:VEVENT").skip(1) {
+        let Some((body, _)) = component.split_once("END:VEVENT") else { return Err("Incomplete VEVENT".into()) };
+        let mut fields = Vec::new();
+        let mut nested = 0;
+        for line in body.lines() {
+            let Some((key, value)) = line.split_once(':') else { continue };
+            if key == "BEGIN" { nested += 1; continue }
+            if key == "END" { nested -= 1; continue }
+            if nested == 0 {
+                let (name, params) = key.split_once(';').unwrap_or((key, ""));
+                fields.push(Property { name, params, value });
+            }
+        }
+        let get = |key: &str| fields.iter().copied().find(|p| p.name.eq_ignore_ascii_case(key));
+        let uid = get("UID").map_or("", |p| p.value);
+        let recurrence = get("RECURRENCE-ID").and_then(|p| Some(occurrence_key(p.datetime()?, p.all_day())));
+        if let Some(key) = &recurrence {
+            overrides.insert((uid.to_string(), key.clone()));
+        }
+        if get("STATUS").is_some_and(|p| p.value.eq_ignore_ascii_case("CANCELLED")) { continue }
+        let (Some(start), Some(summary)) = (get("DTSTART"), get("SUMMARY")) else { continue };
+        let Some(first) = start.datetime() else { continue };
+        let end = get("DTEND").filter(|p| !p.all_day()).and_then(Property::datetime);
+        let all_day = start.all_day();
+        let make_event = |at: chrono::DateTime<rrule::Tz>, instance| {
+            let local = at.with_timezone(&Local);
+            let date = if all_day { at.date_naive().to_string() } else { local_date(&local) };
+            let time = (!all_day).then(|| local.format("%H:%M").to_string());
+            let uid = if uid.is_empty() {
+                ext_id(&[Some(summary.value), Some(&date), time.as_deref()])
+            } else { uid.to_string() };
+            IcsEvent {
+                uid, recurrence_id: instance, date, time, all_day,
+                end_time: end.map(|e| (local + (e - first)).format("%H:%M").to_string()),
+                summary: unescape_ics(summary.value).trim().into(),
+                description: get("DESCRIPTION").map(|p| unescape_ics(p.value).trim().into()).unwrap_or_default(),
+            }
+        };
+        if !fields.iter().any(|p| p.name.eq_ignore_ascii_case("RRULE") || p.name.eq_ignore_ascii_case("RDATE")) {
+            events.push(make_event(first, recurrence));
+            continue;
+        }
+        let mut set = rrule::RRuleSet::new(first).rdate(first);
+        for p in fields.iter().copied() {
+            if p.name.eq_ignore_ascii_case("RRULE") {
+                let rule = p.value.parse::<rrule::RRule<rrule::Unvalidated>>().and_then(|r| r.validate(first))
+                    .map_err(|_| "Invalid RRULE")?;
+                // School timetables have at most hourly occurrences. Very fine frequencies can
+                // require scanning millions of historical instances before the visible window.
+                if matches!(rule.get_freq(), rrule::Frequency::Secondly | rrule::Frequency::Minutely) {
+                    return Err("Unsupported sub-hourly calendar series".into());
+                }
+                set = set.rrule(rule);
+            } else if p.name.eq_ignore_ascii_case("RDATE") || p.name.eq_ignore_ascii_case("EXDATE") {
+                for value in p.value.split(',') {
+                    let date = Property { value, ..p }.datetime().ok_or("Invalid recurrence date")?;
+                    set = if p.name.eq_ignore_ascii_case("RDATE") { set.rdate(date) } else { set.exdate(date) };
                 }
             }
-        } else if let Some(ev) = cur.as_mut() {
-            let Some(idx) = line.find(':') else { continue };
-            let mut parts = line[..idx].split(';');
-            let name = parts.next().unwrap_or("").to_uppercase();
-            let params = parts.collect::<Vec<_>>().join(";");
-            ev.insert(name, (line[idx + 1..].to_string(), params));
+        }
+        let bound = |days, h| {
+            let day = today + Duration::days(days);
+            rrule::Tz::LOCAL.from_local_datetime(&day.and_hms_opt(h, 0, 0)?).earliest()
+        };
+        let start_bound = bound(-2, 0).ok_or("Invalid calendar window")?;
+        let end_bound = bound(182, 0).ok_or("Invalid calendar window")?;
+        let result = set.after(start_bound).before(end_bound).all(10_000);
+        if result.limited { return Err("Calendar series exceeds expansion limit".into()) }
+        for at in result.dates {
+            let key = occurrence_key(at, all_day);
+            instances.push(make_event(at, Some(key)));
         }
     }
-    events
+    events.extend(instances.into_iter().filter(|e| {
+        !overrides.contains(&(e.uid.clone(), e.recurrence_id.clone().expect("expanded occurrence")))
+    }));
+    Ok(events)
 }
 
 pub fn is_deadline_event(e: &IcsEvent) -> bool {
@@ -650,6 +708,10 @@ pub fn is_deadline_event(e: &IcsEvent) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn copenhagen_time(hour: u32, minute: u32) -> String {
+        chrono::Utc.with_ymd_and_hms(2026, 11, 23, hour - 1, minute, 0).unwrap().with_timezone(&Local).format("%H:%M").to_string()
+    }
 
     fn titles(p: &ImportPreview) -> Vec<&str> {
         p.items.iter().map(|i| i.title.as_str()).collect()
@@ -809,14 +871,14 @@ mod tests {
     #[test]
     fn ics_events() {
         let ics = "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:abc@lectio\r\nSUMMARY:Aflevering: Dansk\r\n  analyse\r\nDTSTART;VALUE=DATE:20261125\r\nEND:VEVENT\r\nBEGIN:VEVENT\r\nUID:les1\r\nSUMMARY:2a MA\\, modul 3\r\nDESCRIPTION:Lokale 12\\nTag lommeregner\r\nDTSTART;TZID=Europe/Copenhagen:20261123T081500\r\nDTEND;TZID=Europe/Copenhagen:20261123T094500\r\nEND:VEVENT\r\nBEGIN:VEVENT\r\nSUMMARY:Uden start\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
-        let ev = parse_ics(ics);
+        let ev = parse_ics(ics, Local::now().date_naive()).unwrap();
         assert_eq!(ev.len(), 2);
         assert_eq!(ev[0].summary, "Aflevering: Dansk analyse");
         assert!(ev[0].all_day && is_deadline_event(&ev[0]));
         assert_eq!(ev[0].date, "2026-11-25");
         assert_eq!(ev[1].summary, "2a MA, modul 3");
         assert_eq!(ev[1].description, "Lokale 12\nTag lommeregner");
-        assert_eq!((ev[1].time.as_deref(), ev[1].end_time.as_deref()), (Some("08:15"), Some("09:45")));
+        assert_eq!((ev[1].time.as_deref(), ev[1].end_time.as_deref()), (Some(copenhagen_time(8, 15).as_str()), Some(copenhagen_time(9, 45).as_str())));
         assert!(!is_deadline_event(&ev[1]));
         assert!(is_date_only_param("VALUE=DATE"));
         assert!(!is_date_only_param("VALUE=DATE-TIME"));
@@ -944,12 +1006,12 @@ mod tests {
     }
 
     #[test]
-    fn same_as_old_version_json_array_with_numbers_and_bools() {
+    fn json_array_with_numbers_bools_and_explicit_minutes() {
         check(
             "mitnielsbrock",
             "[{\"title\":\"Aflevering: Marketing case\",\"subject\":\"Afsætning\",\"due\":\"2026-09-20\",\"estimated_minutes\":90,\"done\":false},{\"title\":\"Afsætning modul\",\"subject\":\"af\",\"date\":\"2026-09-16\",\"time\":\"08:15\",\"end\":\"09:45\"},{\"title\":42,\"subject\":\"Matematik\",\"date\":\"2026-09-17\"},{\"title\":true,\"subject\":null,\"date\":\"2026-09-18\"},{\"title\":\"Halvanden time\",\"estimated_minutes\":1.5,\"date\":\"2026-09-19\"},{\"title\":\"Uden dato\",\"subject\":\"Engelsk\"},{\"title\":\"Lektion uden dag\",\"subject\":\"Engelsk\",\"time\":\"10:00\"},{\"subject\":\"Ingen titel\",\"date\":\"2026-09-21\"},null,7,\"tekst\"]",
             true,
-            r#"{ "detected_format": "JSON", "items": [ { "kind": "deadline", "title": "Aflevering: Marketing case", "subject": "Afsætning", "subject_key": "afsætning", "date": "2026-09-20", "day": "Søndag", "time": null, "end_time": null, "notes": null, "external_id": "ddf9a2206fbf42d8", "selected": true, "estimated_minutes": 90 }, { "kind": "lesson", "title": "Afsætning modul", "subject": "Afsætning", "subject_key": "afsætning", "date": "2026-09-16", "day": "Onsdag", "time": "08:15", "end_time": "09:45", "notes": null, "external_id": "513d809513c69b09", "selected": true, "estimated_minutes": null }, { "kind": "deadline", "title": "42", "subject": "Matematik", "subject_key": "matematik", "date": "2026-09-17", "day": "Torsdag", "time": null, "end_time": null, "notes": null, "external_id": "27c9e743f8ff4adf", "selected": true, "estimated_minutes": null }, { "kind": "deadline", "title": "true", "subject": "Selvstudie", "subject_key": "selvstudie", "date": "2026-09-18", "day": "Fredag", "time": null, "end_time": null, "notes": null, "external_id": "c4b5192901c2753e", "selected": true, "estimated_minutes": null }, { "kind": "deadline", "title": "Halvanden time", "subject": "Selvstudie", "subject_key": "selvstudie", "date": "2026-09-19", "day": "Lørdag", "time": null, "end_time": null, "notes": null, "external_id": "e9beb1f05c7effa2", "selected": true, "estimated_minutes": 90 }, { "kind": "deadline", "title": "Uden dato", "subject": "Engelsk", "subject_key": "engelsk", "date": null, "day": null, "time": null, "end_time": null, "notes": null, "external_id": "68782d692f276489", "selected": false, "estimated_minutes": null }, { "kind": "lesson", "title": "Lektion uden dag", "subject": "Engelsk", "subject_key": "engelsk", "date": null, "day": null, "time": "10:00", "end_time": null, "notes": null, "external_id": "dbcb196df5b4f231", "selected": false, "estimated_minutes": null } ], "warnings": [ "1 deadlines mangler en dato og er ikke valgt. Ret datoen i filen, eller vælg dem til, så får de dags dato.", "1 lektioner mangler dato/ugedag og springes over." ] }"#,
+            r#"{ "detected_format": "JSON", "items": [ { "kind": "deadline", "title": "Aflevering: Marketing case", "subject": "Afsætning", "subject_key": "afsætning", "date": "2026-09-20", "day": "Søndag", "time": null, "end_time": null, "notes": null, "external_id": "ddf9a2206fbf42d8", "selected": true, "estimated_minutes": 90 }, { "kind": "lesson", "title": "Afsætning modul", "subject": "Afsætning", "subject_key": "afsætning", "date": "2026-09-16", "day": "Onsdag", "time": "08:15", "end_time": "09:45", "notes": null, "external_id": "513d809513c69b09", "selected": true, "estimated_minutes": null }, { "kind": "deadline", "title": "42", "subject": "Matematik", "subject_key": "matematik", "date": "2026-09-17", "day": "Torsdag", "time": null, "end_time": null, "notes": null, "external_id": "27c9e743f8ff4adf", "selected": true, "estimated_minutes": null }, { "kind": "deadline", "title": "true", "subject": "Selvstudie", "subject_key": "selvstudie", "date": "2026-09-18", "day": "Fredag", "time": null, "end_time": null, "notes": null, "external_id": "c4b5192901c2753e", "selected": true, "estimated_minutes": null }, { "kind": "deadline", "title": "Halvanden time", "subject": "Selvstudie", "subject_key": "selvstudie", "date": "2026-09-19", "day": "Lørdag", "time": null, "end_time": null, "notes": null, "external_id": "e9beb1f05c7effa2", "selected": true, "estimated_minutes": 2 }, { "kind": "deadline", "title": "Uden dato", "subject": "Engelsk", "subject_key": "engelsk", "date": null, "day": null, "time": null, "end_time": null, "notes": null, "external_id": "68782d692f276489", "selected": false, "estimated_minutes": null }, { "kind": "lesson", "title": "Lektion uden dag", "subject": "Engelsk", "subject_key": "engelsk", "date": null, "day": null, "time": "10:00", "end_time": null, "notes": null, "external_id": "dbcb196df5b4f231", "selected": false, "estimated_minutes": null } ], "warnings": [ "1 deadlines mangler en dato og er ikke valgt. Ret datoen i filen, eller vælg dem til, så får de dags dato.", "1 lektioner mangler dato/ugedag og springes over." ] }"#,
         );
     }
 
@@ -1137,13 +1199,13 @@ mod tests {
     fn ics_events_same_as_old_version() {
         let ics = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:abc@lectio\r\nSUMMARY:Aflevering: Dansk\r\n  analyse\r\nDTSTART;VALUE=DATE:20261125\r\nDTEND;VALUE=DATE:20261126\r\nEND:VEVENT\r\nBEGIN:VEVENT\r\nUID:les1\r\nSUMMARY:2a MA\\, modul 3; lokale 12\r\nDESCRIPTION:Lokale 12\\nTag lommeregner\\N\\\\slut\r\nDTSTART;TZID=Europe/Copenhagen:20261123T081500\r\nDTEND;TZID=Europe/Copenhagen:20261123T094500\r\nEND:VEVENT\r\nBEGIN:VEVENT\nSUMMARY:Uden uid\nDTSTART:20261124T1000\nDTEND;VALUE=DATE-TIME:20261124T113000\nEND:VEVENT\nBEGIN:VEVENT\nUID:\nSUMMARY:Tom uid\ndtstart:20261127T120000\nEND:VEVENT\nBEGIN:VEVENT\nUID:dato-param\nSUMMARY:Heldagsprøve\nDTSTART;VALUE=DATE:20261128T090000\nEND:VEVENT\nBEGIN:VEVENT\nUID:ingen-start\nSUMMARY:Uden start\nEND:VEVENT\nBEGIN:VEVENT\nUID:ingen-titel\nDTSTART:20261129T080000\nEND:VEVENT\nBEGIN:VEVENT\nUID:folded\nSUMMARY:Lang\n\ttitel med tab\nDTSTART:20261130T081500\nDTEND:20261130\nEND:VEVENT\nEND:VCALENDAR\r\n";
         let expected = vec![
-            IcsEvent { uid: "abc@lectio".into(), summary: "Aflevering: Dansk analyse".into(), description: "".into(), date: "2026-11-25".into(), time: None, end_time: None, all_day: true },
-            IcsEvent { uid: "les1".into(), summary: "2a MA, modul 3; lokale 12".into(), description: "Lokale 12\nTag lommeregner\n\\slut".into(), date: "2026-11-23".into(), time: Some("08:15".into()), end_time: Some("09:45".into()), all_day: false },
-            IcsEvent { uid: "659ef6710c8d544d".into(), summary: "Uden uid".into(), description: "".into(), date: "2026-11-24".into(), time: Some("10:00".into()), end_time: Some("11:30".into()), all_day: false },
-            IcsEvent { uid: "2db290d55b327546".into(), summary: "Tom uid".into(), description: "".into(), date: "2026-11-27".into(), time: Some("12:00".into()), end_time: None, all_day: false },
-            IcsEvent { uid: "dato-param".into(), summary: "Heldagsprøve".into(), description: "".into(), date: "2026-11-28".into(), time: None, end_time: None, all_day: true },
-            IcsEvent { uid: "folded".into(), summary: "Langtitel med tab".into(), description: "".into(), date: "2026-11-30".into(), time: Some("08:15".into()), end_time: None, all_day: false },
+            IcsEvent { recurrence_id: None, uid: "abc@lectio".into(), summary: "Aflevering: Dansk analyse".into(), description: "".into(), date: "2026-11-25".into(), time: None, end_time: None, all_day: true },
+            IcsEvent { recurrence_id: None, uid: "les1".into(), summary: "2a MA, modul 3; lokale 12".into(), description: "Lokale 12\nTag lommeregner\n\\slut".into(), date: "2026-11-23".into(), time: Some(copenhagen_time(8, 15)), end_time: Some(copenhagen_time(9, 45)), all_day: false },
+            IcsEvent { recurrence_id: None, uid: "659ef6710c8d544d".into(), summary: "Uden uid".into(), description: "".into(), date: "2026-11-24".into(), time: Some("10:00".into()), end_time: Some("11:30".into()), all_day: false },
+            IcsEvent { recurrence_id: None, uid: "2db290d55b327546".into(), summary: "Tom uid".into(), description: "".into(), date: "2026-11-27".into(), time: Some("12:00".into()), end_time: None, all_day: false },
+            IcsEvent { recurrence_id: None, uid: "dato-param".into(), summary: "Heldagsprøve".into(), description: "".into(), date: "2026-11-28".into(), time: None, end_time: None, all_day: true },
+            IcsEvent { recurrence_id: None, uid: "folded".into(), summary: "Langtitel med tab".into(), description: "".into(), date: "2026-11-30".into(), time: Some("08:15".into()), end_time: None, all_day: false },
         ];
-        assert_eq!(parse_ics(ics), expected);
+        assert_eq!(parse_ics(ics, Local::now().date_naive()).unwrap(), expected);
     }
 }

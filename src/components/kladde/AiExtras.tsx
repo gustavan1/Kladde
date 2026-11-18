@@ -38,8 +38,8 @@ function PrivacyNote({ lang }: { lang: Language }) {
     <p className="flex items-start gap-2 text-xs leading-relaxed text-slate-500" data-testid="ai-privacy-note">
       <Lock className="mt-0.5 size-3.5 shrink-0 text-slate-400" />
       {lang === "da"
-        ? "Når du bruger AI, sendes teksten (fx din note eller dit spørgsmål) til Google Gemini. På Googles gratis niveau må Google bruge den til at forbedre sine produkter, så skriv ikke personlige eller følsomme oplysninger. Resten af Kladde bliver på din computer."
-        : "When you use AI, the text (e.g. your note or question) is sent to Google Gemini. On Google's free tier, Google may use it to improve its products, so don't write personal or sensitive information. The rest of Kladde stays on your computer."}
+        ? "Når du bruger AI, sendes teksten (fx din note eller dit spørgsmål) til Google Gemini. Googles brug af data afhænger af din region og projektets betalingsstatus. Undgå personlige eller følsomme oplysninger. Resten af Kladde bliver på din computer."
+        : "When you use AI, the text (e.g. your note or question) is sent to Google Gemini. Google’s use of data depends on your region and billing status. Avoid personal or sensitive information. The rest of Kladde stays on your computer."}
     </p>
   );
 }
@@ -134,12 +134,12 @@ export function AiSetup({ lang }: { lang: Language }) {
     <Card className="border-blue-100 shadow-sm" data-testid="ai-setup-card">
       <CardHeader>
         <CardTitle className="flex items-center gap-2 font-heading text-lg">
-          <KeyRound className="size-4 text-blue-600" /> {da ? "Slå AI til (gratis)" : "Switch on AI (free)"}
+          <KeyRound className="size-4 text-blue-600" /> {da ? "Slå AI til" : "Switch on AI"}
         </CardTitle>
         <p className="text-sm text-slate-500">
           {da
-            ? "Kladde bruger Google Gemini. Du skal bruge en gratis nøgle – det tager 2 minutter:"
-            : "Kladde uses Google Gemini. You need a free key – it takes 2 minutes:"}
+            ? "Google kræver, at API-brugere er mindst 18 år. Brug din egen Gemini-nøgle."
+            : "Google requires API users to be at least 18. Use your own Gemini key."}
         </p>
       </CardHeader>
       <CardContent className="space-y-4">
@@ -171,7 +171,7 @@ export function AiSetup({ lang }: { lang: Language }) {
             type="password"
             value={key}
             onChange={(e) => setKey(e.target.value)}
-            placeholder="AIza…"
+            placeholder={da ? "Gemini-nøgle" : "Gemini API key"}
             autoComplete="off"
             className="h-10 min-w-0 flex-1 rounded-xl font-mono"
             data-testid="ai-key-input"
@@ -187,8 +187,8 @@ export function AiSetup({ lang }: { lang: Language }) {
         </form>
         <p className="text-xs text-slate-400">
           {da
-            ? "Nøglen gemmes kun på denne computer (ikke i backup-filen). Den gratis nøgle har en daglig grænse for, hvor meget du kan spørge."
-            : "The key is only stored on this computer (not in the backup file). The free key has a daily limit on how much you can ask."}
+            ? "Nøglen gemmes kun på denne computer (ikke i backup-filen). Google fastsætter kvoten for dit projekt."
+            : "The key is only stored on this computer (not in the backup file). Google sets the quota for your project."}
         </p>
         <PrivacyNote lang={lang} />
       </CardContent>

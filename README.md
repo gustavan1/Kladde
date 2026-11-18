@@ -3,7 +3,7 @@
 Kladde is a study app for notes, homework and a weekly study plan. It runs as a normal Windows program in its own window.
 
 - **Everything stays on your PC.** There's no account and no login.
-- **AI is optional.** You can switch it on with a free Google Gemini key (see section 4).
+- **AI is optional.** You can switch it on with your own Google Gemini key (see section 4).
 - **It only goes online when you use AI, or for a calendar link that you add yourself** under "Importér fra skole".
 - **Your data is one file** that you can back up and move to another computer.
 
@@ -60,12 +60,14 @@ To open the folder, press **Windows key + R**, type `%APPDATA%\Kladde` and press
 
 **Move to a new PC:** install Kladde on the new PC and open it once, then close it. Restore your backup as described above.
 
-### 4. AI (optional, free)
+### 4. AI (optional)
+
+Google requires API users to be 18 or older and excludes apps directed at or likely to be accessed by under-18s. Google also requires paid services when offering an API client to users in the EEA, Switzerland or the UK. Review the intended audience before distributing a build with Gemini. [Gemini API Additional Terms](https://ai.google.dev/gemini-api/terms)
 
 Kladde can use Google Gemini for these:
 
 - **AI-hjælper** (in the menu): a chat where you can ask about anything in your subjects. It can also help plan your deadlines; it can see your homework.
-  - Pick a subject at the top ("Biologi + mine noter"), and it also reads your notes for that subject.
+  - Pick a subject at the top ("Biologi + mine noter"), and it also reads notes for that subject. “All subjects (no notes)” excludes note titles and bodies. Chat requests include recent messages from the selected subject.
 - **In your notes:**
   - Tidy up a messy note, make notes from text you've pasted in, or make a summary.
   - On a saved note: summarise it, explain the hard parts, or make practice questions.
@@ -78,14 +80,14 @@ Kladde can use Google Gemini for these:
 
 1. Open Kladde and click **AI-hjælper** in the menu.
 2. Click the link **aistudio.google.com/apikey**. It opens in your browser. Sign in with a Google account.
-3. Click **Create API key** and copy the key. It starts with `AIza`.
+3. Click **Create API key** and copy the key. Use a key dedicated to Gemini.
 4. Back in Kladde, paste the key and click **Gem nøgle**. Kladde checks the key and picks a suitable Gemini model.
 
 **Good to know:**
 
-- **The free key has a limit** on how much you can ask per minute and per day. If you see "Gratis-grænsen hos Google er nået", wait a minute, or until the next day.
-- **What gets sent to Google:** when you use AI, the text is sent to Google Gemini (your note, your question, and for the chat your list of homework). On Google's free tier, Google may use it to improve its products. So **don't write personal or sensitive information** in what you send to the AI. Nothing is sent when you don't use AI.
-- **Where the key is stored:** in `%APPDATA%\Kladde\settings.json`. That's a separate file, so it's **not** included in your backups. You can remove it under **AI-hjælper → AI-indstillinger → Fjern nøgle**.
+- **Google sets quotas** by model and project. If a request hits a quota, check the project’s limits in AI Studio before retrying.
+- **What gets sent to Google:** when you use AI, the text is sent to Google Gemini (your note, your question, and for the chat your list of homework). How Google handles prompts and responses depends on your region and billing status. So **don't write personal or sensitive information** in what you send to the AI. Nothing is sent when you don't use AI.
+- **Where the key is stored:** in `%APPDATA%\Kladde\settings.json`. The key is plain text readable by your Windows account. That's a separate file, so it's **not** included in your backups. You can remove it under **AI-hjælper → AI-indstillinger → Fjern nøgle**.
 - **The AI can make mistakes.** Always check what it writes, especially facts and formulas.
 
 ### Updating and uninstalling

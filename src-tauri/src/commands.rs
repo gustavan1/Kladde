@@ -12,7 +12,7 @@ use crate::feeds;
 use crate::importers::{clean_subject, js_round, parse_import};
 use crate::planner::{make_study_plan, weekly_summary, StudyPlan, WeeklySummary};
 use crate::store::{
-    add_days, day_name, local_date, new_id, now_iso, to_pretty_json, Block, CalendarFeed, Note, Store, Subject, Task,
+    add_days, day_name, local_date, new_id, now_iso, to_pretty_json, Block, CalendarFeed, Note, Store, Subject, Task, Transaction,
 };
 
 pub struct AppState {
@@ -188,9 +188,10 @@ pub fn create_subject(state: State<'_, AppState>, lang: Option<String>, body: Va
     if name.is_empty() {
         return Err(err(400, tr(&lang, "Faget skal have et navn.", "The subject needs a name.")));
     }
-    let mut store = lock(&state);
+    let mut guard = lock(&state);
+    let mut store = guard.transaction();
     let (subject, _) = store.data.ensure_subject(&name);
-    store.save()?;
+    store.commit()?;
     Ok(subject)
 }
 
@@ -204,7 +205,12 @@ struct NoteFields {
     is_pinned: Option<bool>,
 }
 
-fn note_fields(store: &mut Store, lang: &Option<String>, b: &Value) -> NoteFields {
+fn note_fields(store: &mut Transaction<'_>, lang: &Option<String>, b: &Value) -> Res<NoteFields> {
+    for (key, limit) in [("title", 300), ("content", 200_000)] {
+        if b[key].as_str().is_some_and(|text| text.chars().count() > limit) {
+            return Err(err(400, tr(lang, "Titlen må højst have 300 tegn og noten 200.000 tegn.", "A title can have up to 300 characters and a note up to 200,000.")));
+        }
+    }
     let mut out = NoteFields::default();
     if has(b, "title") {
         let t = str_of(field(b, "title"), 300).trim().to_string();
@@ -219,7 +225,7 @@ fn note_fields(store: &mut Store, lang: &Option<String>, b: &Value) -> NoteField
     if has(b, "is_pinned") {
         out.is_pinned = Some(truthy(field(b, "is_pinned")));
     }
-    out
+    Ok(out)
 }
 
 fn apply_note(note: &mut Note, f: NoteFields) {
@@ -240,7 +246,8 @@ fn apply_note(note: &mut Note, f: NoteFields) {
 
 #[tauri::command]
 pub fn create_note(state: State<'_, AppState>, lang: Option<String>, body: Value) -> Res<Note> {
-    let mut store = lock(&state);
+    let mut guard = lock(&state);
+    let mut store = guard.transaction();
     let now = now_iso();
     let mut note = Note {
         id: new_id(),
@@ -252,20 +259,21 @@ pub fn create_note(state: State<'_, AppState>, lang: Option<String>, body: Value
         created_at: now.clone(),
         updated_at: now,
     };
-    let f = note_fields(&mut store, &lang, &body);
+    let f = note_fields(&mut store, &lang, &body)?;
     apply_note(&mut note, f);
     store.data.notes.push(note.clone());
-    store.save()?;
+    store.commit()?;
     Ok(note)
 }
 
 #[tauri::command]
 pub fn update_note(state: State<'_, AppState>, lang: Option<String>, id: String, body: Value) -> Res<Note> {
-    let mut store = lock(&state);
+    let mut guard = lock(&state);
+    let mut store = guard.transaction();
     if !store.data.notes.iter().any(|n| n.id == id) {
         return Err(not_found(&lang));
     }
-    let f = note_fields(&mut store, &lang, &body);
+    let f = note_fields(&mut store, &lang, &body)?;
     // Pinning alone does not count as editing the note.
     let only_pin = f.title.is_none() && f.content.is_none() && f.subject.is_none();
     let note = store.data.notes.iter_mut().find(|n| n.id == id).expect("checked above");
@@ -274,19 +282,20 @@ pub fn update_note(state: State<'_, AppState>, lang: Option<String>, id: String,
         note.updated_at = now_iso();
     }
     let note = note.clone();
-    store.save()?;
+    store.commit()?;
     Ok(note)
 }
 
 #[tauri::command]
 pub fn delete_note(state: State<'_, AppState>, lang: Option<String>, id: String) -> Res<Value> {
-    let mut store = lock(&state);
+    let mut guard = lock(&state);
+    let mut store = guard.transaction();
     let before = store.data.notes.len();
     store.data.notes.retain(|n| n.id != id);
     if store.data.notes.len() == before {
         return Err(not_found(&lang));
     }
-    store.save()?;
+    store.commit()?;
     Ok(json!({ "deleted": true }))
 }
 
@@ -302,7 +311,7 @@ struct TaskFields {
     status: Option<String>,
 }
 
-fn task_fields(store: &mut Store, b: &Value) -> TaskFields {
+fn task_fields(store: &mut Transaction<'_>, b: &Value) -> TaskFields {
     let mut out = TaskFields::default();
     if has(b, "title") {
         out.title = Some(str_of(field(b, "title"), 300).trim().to_string());
@@ -357,7 +366,8 @@ fn apply_task(task: &mut Task, f: TaskFields) {
 
 #[tauri::command]
 pub fn create_task(state: State<'_, AppState>, lang: Option<String>, body: Value) -> Res<Task> {
-    let mut store = lock(&state);
+    let mut guard = lock(&state);
+    let mut store = guard.transaction();
     let f = task_fields(&mut store, &body);
     if f.title.as_deref().unwrap_or("").is_empty() {
         return Err(err(400, tr(&lang, "Opgaven skal have en titel.", "The task needs a title.")));
@@ -370,13 +380,14 @@ pub fn create_task(state: State<'_, AppState>, lang: Option<String>, body: Value
     };
     apply_task(&mut task, f);
     store.data.tasks.push(task.clone());
-    store.save()?;
+    store.commit()?;
     Ok(task)
 }
 
 #[tauri::command]
 pub fn update_task(state: State<'_, AppState>, lang: Option<String>, id: String, body: Value) -> Res<Task> {
-    let mut store = lock(&state);
+    let mut guard = lock(&state);
+    let mut store = guard.transaction();
     if !store.data.tasks.iter().any(|t| t.id == id) {
         return Err(not_found(&lang));
     }
@@ -392,20 +403,21 @@ pub fn update_task(state: State<'_, AppState>, lang: Option<String>, id: String,
     }
     apply_task(task, f);
     let task = task.clone();
-    store.save()?;
+    store.commit()?;
     Ok(task)
 }
 
 #[tauri::command]
 pub fn delete_task(state: State<'_, AppState>, lang: Option<String>, id: String) -> Res<Value> {
-    let mut store = lock(&state);
+    let mut guard = lock(&state);
+    let mut store = guard.transaction();
     let before = store.data.tasks.len();
     store.data.tasks.retain(|t| t.id != id);
     if store.data.tasks.len() == before {
         return Err(not_found(&lang));
     }
     store.data.blocks.retain(|b| !(b.source.as_deref() == Some("plan") && b.external_id.as_deref() == Some(id.as_str())));
-    store.save()?;
+    store.commit()?;
     Ok(json!({ "deleted": true }))
 }
 
@@ -421,7 +433,8 @@ pub fn create_block(state: State<'_, AppState>, lang: Option<String>, body: Valu
     if label.is_empty() || !days.contains(&day.as_str()) || !is_hhmm(&time) {
         return Err(err(400, tr(&lang, "Udfyld titel, dag og tidspunkt.", "Fill in title, day and time.")));
     }
-    let mut store = lock(&state);
+    let mut guard = lock(&state);
+    let mut store = guard.transaction();
     let subject_name = match str_of(field(b, "subject"), 60) {
         s if s.is_empty() => "Selvstudie".to_string(),
         s => s,
@@ -440,19 +453,20 @@ pub fn create_block(state: State<'_, AppState>, lang: Option<String>, body: Valu
         external_id: None,
     };
     store.data.blocks.push(block.clone());
-    store.save()?;
+    store.commit()?;
     Ok(block)
 }
 
 #[tauri::command]
 pub fn delete_block(state: State<'_, AppState>, lang: Option<String>, id: String) -> Res<Value> {
-    let mut store = lock(&state);
+    let mut guard = lock(&state);
+    let mut store = guard.transaction();
     let before = store.data.blocks.len();
     store.data.blocks.retain(|b| b.id != id);
     if store.data.blocks.len() == before {
         return Err(not_found(&lang));
     }
-    store.save()?;
+    store.commit()?;
     Ok(json!({ "deleted": true }))
 }
 
@@ -460,23 +474,25 @@ pub fn delete_block(state: State<'_, AppState>, lang: Option<String>, id: String
 
 #[tauri::command]
 pub fn make_study_plan_cmd(state: State<'_, AppState>, lang: Option<String>) -> Res<StudyPlan> {
-    let mut store = lock(&state);
+    let mut guard = lock(&state);
+    let mut store = guard.transaction();
     let plan = make_study_plan(&store.data, is_da(&lang), &Local::now()).ok_or_else(|| {
         err(409, tr(&lang, "Ingen åbne deadlines de næste 14 dage.", "No open deadlines in the next 14 days."))
     })?;
     store.data.blocks.retain(|b| b.source.as_deref() != Some("plan"));
     store.data.blocks.extend(plan.blocks.iter().cloned());
-    store.save()?;
+    store.commit()?;
     Ok(plan)
 }
 
 #[tauri::command]
 pub fn clear_study_plan(state: State<'_, AppState>) -> Res<Value> {
-    let mut store = lock(&state);
+    let mut guard = lock(&state);
+    let mut store = guard.transaction();
     let before = store.data.blocks.len();
     store.data.blocks.retain(|b| b.source.as_deref() != Some("plan"));
     let deleted = before - store.data.blocks.len();
-    store.save()?;
+    store.commit()?;
     Ok(json!({ "deleted": deleted }))
 }
 
@@ -498,16 +514,16 @@ pub fn import_preview(state: State<'_, AppState>, lang: Option<String>, body: Va
     let mut result = parse_import(&source, &content, is_da(&lang)).map_err(|m| err(400, m))?;
     // Already-imported rows are shown but not ticked.
     let store = lock(&state);
-    let known: std::collections::HashSet<&str> = store
+    let known: std::collections::HashSet<(&str, &str)> = store
         .data
         .tasks
         .iter()
-        .filter_map(|t| t.external_id.as_deref())
-        .chain(store.data.blocks.iter().filter_map(|b| b.external_id.as_deref()))
+        .filter_map(|t| Some((t.external_id.as_deref()?, t.subject.as_str())))
+        .chain(store.data.blocks.iter().filter_map(|b| Some((b.external_id.as_deref()?, b.subject.as_str()))))
         .collect();
     let mut dupes = 0;
     for item in result.items.iter_mut() {
-        if item.external_id.as_deref().is_some_and(|e| known.contains(e)) {
+        if item.external_id.as_deref().is_some_and(|e| known.contains(&(e, item.subject.as_str()))) {
             item.selected = false;
             dupes += 1;
         }
@@ -540,7 +556,14 @@ pub fn minutes_between(start: &str, end: &str) -> Option<i64> {
 #[tauri::command]
 pub fn import_commit(state: State<'_, AppState>, lang: Option<String>, body: Value) -> Res<Value> {
     let items: Vec<Value> = field(&body, "items").and_then(|v| v.as_array()).cloned().unwrap_or_default();
-    let mut store = lock(&state);
+    let mut guard = lock(&state);
+    let mut store = guard.transaction();
+    let result = import_items(&mut store.data, &items, &lang);
+    store.commit()?;
+    Ok(result)
+}
+
+fn import_items(data: &mut crate::store::Data, items: &[Value], lang: &Option<String>) -> Value {
     let today = local_date(&Local::now());
     let (mut tasks, mut blocks, mut subjects, mut skipped) = (0, 0, 0, 0);
     for item in items.iter().filter(|i| truthy(field(i, "selected"))) {
@@ -548,7 +571,7 @@ pub fn import_commit(state: State<'_, AppState>, lang: Option<String>, body: Val
         if title.is_empty() {
             continue;
         }
-        let (subject, created) = store.data.ensure_subject(&clean_subject(&str_of(field(item, "subject"), 60)));
+        let (subject, created) = data.ensure_subject(&clean_subject(&str_of(field(item, "subject"), 60)));
         if created {
             subjects += 1;
         }
@@ -557,16 +580,16 @@ pub fn import_commit(state: State<'_, AppState>, lang: Option<String>, body: Val
         let date = str_of(field(item, "date"), 20);
         if kind == "deadline" {
             let deadline = if is_date(&date) { date } else { today.clone() };
-            let d = &store.data;
-            if ext.as_ref().is_some_and(|e| d.tasks.iter().any(|t| t.external_id.as_ref() == Some(e)))
-                || d.tasks.iter().any(|t| t.title == title && t.deadline == deadline)
-            {
+            if data.tasks.iter().any(|t| {
+                t.subject_key == subject.key && ((ext.is_some() && t.external_id == ext)
+                    || (t.title == title && t.deadline == deadline))
+            }) {
                 skipped += 1;
                 continue;
             }
             let est = js_number(field(item, "estimated_minutes"));
             let past = deadline < today;
-            store.data.tasks.push(Task {
+            data.tasks.push(Task {
                 id: new_id(),
                 title,
                 subject: subject.name,
@@ -593,12 +616,12 @@ pub fn import_commit(state: State<'_, AppState>, lang: Option<String>, body: Val
                 skipped += 1;
                 continue;
             };
-            if store.data.blocks.iter().any(|b| b.day == day && b.time == time && b.label == title) {
+            if data.blocks.iter().any(|b| b.day == day && b.time == time && b.label == title && b.subject == subject.name) {
                 skipped += 1;
                 continue;
             }
             let minutes = minutes_between(&time, &str_of(field(item, "end_time"), 5));
-            store.data.blocks.push(Block {
+            data.blocks.push(Block {
                 id: new_id(),
                 day,
                 time,
@@ -612,8 +635,7 @@ pub fn import_commit(state: State<'_, AppState>, lang: Option<String>, body: Val
             blocks += 1;
         }
     }
-    store.save()?;
-    let message = if is_da(&lang) {
+    let message = if is_da(lang) {
         format!(
             "Importeret: {tasks} deadlines, {blocks} lektioner{}{}",
             if subjects > 0 { format!(", {subjects} nye fag") } else { String::new() },
@@ -626,13 +648,13 @@ pub fn import_commit(state: State<'_, AppState>, lang: Option<String>, body: Val
             if skipped > 0 { format!(" · {skipped} duplicates skipped") } else { String::new() }
         )
     };
-    Ok(json!({
+    json!({
         "imported_tasks": tasks,
         "imported_blocks": blocks,
         "imported_subjects": subjects,
         "skipped_duplicates": skipped,
         "message": message,
-    }))
+    })
 }
 
 // ---------- Calendar links ----------
@@ -648,9 +670,12 @@ pub async fn add_feed(app: AppHandle, lang: Option<String>, body: Value) -> Res<
     if url::Url::parse(&url).is_err() {
         return Err(err(400, tr(&lang, "Det ligner ikke et gyldigt link.", "That does not look like a valid link.")));
     }
-    let id = {
+    let da = is_da(&lang);
+    tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
-        let mut store = state.store.lock().unwrap_or_else(|p| p.into_inner());
+        let fetched = feeds::fetch_calendar(&url, da);
+        let mut guard = state.store.lock().unwrap_or_else(|p| p.into_inner());
+        let mut store = guard.transaction();
         if store.data.feeds.iter().any(|f| f.url == url) {
             return Err(err(409, tr(&lang, "Det link er allerede tilføjet.", "That link is already added.")));
         }
@@ -671,19 +696,21 @@ pub async fn add_feed(app: AppHandle, lang: Option<String>, body: Value) -> Res<
         };
         let id = feed.id.clone();
         store.data.feeds.push(feed);
-        id
-    };
-    feeds::sync_feed(app, id, is_da(&lang)).await.ok_or_else(|| not_found(&lang))
+        let result = feeds::apply_sync(&mut store.data, &id, fetched, da, &Local::now()).expect("newly added feed");
+        store.commit()?;
+        Ok(result)
+    }).await.map_err(|e| err(500, e.to_string()))?
 }
 
 #[tauri::command]
 pub async fn sync_feed(app: AppHandle, lang: Option<String>, id: String) -> Res<Value> {
-    feeds::sync_feed(app, id, is_da(&lang)).await.ok_or_else(|| not_found(&lang))
+    feeds::sync_feed(app, id, is_da(&lang)).await?.ok_or_else(|| not_found(&lang))
 }
 
 #[tauri::command]
 pub fn delete_feed(state: State<'_, AppState>, lang: Option<String>, id: String) -> Res<Value> {
-    let mut store = lock(&state);
+    let mut guard = lock(&state);
+    let mut store = guard.transaction();
     let before = store.data.feeds.len();
     store.data.feeds.retain(|f| f.id != id);
     if store.data.feeds.len() == before {
@@ -692,6 +719,37 @@ pub fn delete_feed(state: State<'_, AppState>, lang: Option<String>, id: String)
     // Its lessons go; its deadlines stay (they may already be worked on).
     let source = format!("feed:{id}");
     store.data.blocks.retain(|b| b.source.as_deref() != Some(source.as_str()));
-    store.save()?;
+    store.commit()?;
     Ok(json!({ "deleted": true }))
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn same_title_and_date_in_two_subjects_imports_once_per_subject() {
+        let preview = parse_import("lectio", "title,subject,date,estimated_minutes\nEssay,Dansk,2026-11-25,10\nEssay,Engelsk,2026-11-25,10", false).unwrap();
+        let items: Vec<Value> = preview.items.iter().map(|i| json!(i)).collect();
+        let mut data = crate::store::Data::default();
+        assert_eq!(import_items(&mut data, &items, &None)["imported_tasks"], 2);
+        assert_eq!(import_items(&mut data, &items, &None)["skipped_duplicates"], 2);
+        assert_eq!(data.tasks.len(), 2);
+        assert!(data.tasks.iter().all(|t| t.estimated_minutes == 10));
+    }
+
+    #[test]
+    fn note_limits_count_unicode_characters_without_truncation() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&dir.path().join("kladde.json")).unwrap();
+        let mut edit = store.transaction();
+        let mut note = json!({"title": "ø".repeat(300), "content": "ø".repeat(200_000)});
+        let valid = note_fields(&mut edit, &None, &note).unwrap();
+        assert_eq!(valid.content.as_deref(), note["content"].as_str());
+        note["content"] = json!("ø".repeat(200_001));
+        assert!(note_fields(&mut edit, &None, &note).is_err());
+        note = json!({"title": "ø".repeat(301)});
+        assert!(note_fields(&mut edit, &None, &note).is_err());
+    }
 }

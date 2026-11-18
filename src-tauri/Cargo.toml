@@ -25,6 +25,7 @@ sha1_smol = "1"
 regex = "1"
 ureq = { version = "2", features = ["json"] }
 url = "2"
+rrule = "0.14"
 
 [dev-dependencies]
 tempfile = "3"
