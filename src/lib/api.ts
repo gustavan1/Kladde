@@ -61,12 +61,12 @@ const routes: Route[] = [
   ["POST", /^\/calendar-feeds$/, "add_feed", withBody],
   ["POST", /^\/calendar-feeds\/([^/]+)\/sync$/, "sync_feed", withId],
   ["DELETE", /^\/calendar-feeds\/([^/]+)$/, "delete_feed", withId],
-  // AI (Google Gemini)
+  // Hosted AI and Claude Desktop
   ["GET", /^\/ai\/status$/, "ai_status", noArgs],
   ["POST", /^\/ai\/key$/, "ai_save_key", withBody],
   ["DELETE", /^\/ai\/key$/, "ai_forget_key", noArgs],
-  ["GET", /^\/ai\/models$/, "ai_models", noArgs],
-  ["POST", /^\/ai\/model$/, "ai_set_model", withBody],
+  ["POST", /^\/ai\/codex$/, "ai_codex", withBody],
+  ["POST", /^\/claude$/, "claude_action", withBody],
   ["POST", /^\/ai\/note$/, "ai_note", withBody],
   ["POST", /^\/ai\/project-plan$/, "ai_project_plan", withBody],
   ["GET", /^\/ai\/messages$/, "ai_messages", noArgs],

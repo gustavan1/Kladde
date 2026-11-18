@@ -831,6 +831,8 @@ function Notes({
   search,
   selected,
   setSelected,
+  draft,
+  setDraft,
   refresh,
   startNew,
   onStarted,
@@ -839,6 +841,8 @@ function Notes({
   data?: Dashboard;
   lang: Language;
   search: string;
+  draft: NoteDraft | null;
+  setDraft: React.Dispatch<React.SetStateAction<NoteDraft | null>>;
   selected: Note | null;
   setSelected: (n: Note | null) => void;
   refresh: () => void;
@@ -849,16 +853,15 @@ function Notes({
   const t = text[lang];
   const da = lang === "da";
   const [filter, setFilter] = useState("all");
-  const [draft, setDraft] = useState<NoteDraft | null>(null);
   const [newSubject, setNewSubject] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const subjects = data?.subjects || [];
   const save = useMutation({
     mutationFn: (payload: NoteDraft & { id?: string }) =>
       payload.id ? apiPatch<Note>(`/notes/${payload.id}`, payload) : apiPost<Note>("/notes", payload),
-    onSuccess: (note) => {
+    onSuccess: (note, savedDraft) => {
       setSelected(note);
-      setDraft(null);
+      setDraft((current) => current === savedDraft ? null : current);
       refresh();
       toast.success(da ? "Note gemt" : "Note saved");
     },
@@ -897,11 +900,31 @@ function Notes({
       (filter === "all" || n.subject_key === filter) &&
       `${n.title} ${n.content} ${n.subject}`.toLowerCase().includes(q),
   );
-  const newNote = () => {
-    const s = subjects.find((x) => x.key === filter) ?? subjects[0];
-    setSelected(null);
-    setDraft({ title: "", content: "", subject: s?.name ?? "Dansk", subject_key: s?.key ?? "dansk" });
+  // Unsaved edits are only asked about when the draft really differs from the saved note.
+  // The question is shown inside the editor: window.confirm() is not available in every
+  // desktop web view, and there it would silently answer "no".
+  const [pendingLeave, setPendingLeave] = useState<(() => void) | null>(null);
+  const draftChanged = () => {
+    if (!draft) return false;
+    if (draft.id) {
+      const saved = data?.notes.find((n) => n.id === draft.id);
+      return !saved || saved.title !== draft.title || saved.content !== draft.content || saved.subject_key !== draft.subject_key;
+    }
+    return Boolean(draft.title.trim() || draft.content.trim());
   };
+  const leaveDraft = (action: () => void) => {
+    if (draftChanged()) setPendingLeave(() => action);
+    else {
+      setPendingLeave(null);
+      action();
+    }
+  };
+  const newNote = () =>
+    leaveDraft(() => {
+      const s = subjects.find((x) => x.key === filter) ?? subjects[0];
+      setSelected(null);
+      setDraft({ title: "", content: "", subject: s?.name ?? "Dansk", subject_key: s?.key ?? "dansk" });
+    });
   useEffect(() => {
     if (startNew) {
       newNote();
@@ -909,8 +932,11 @@ function Notes({
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [startNew]);
+  const titleLength = Array.from(draft?.title ?? "").length;
+  const contentLength = Array.from(draft?.content ?? "").length;
+  const tooLong = titleLength > 300 || contentLength > 200_000;
   const submit = () => {
-    if (draft && draft.title.trim() && !save.isPending) save.mutate(draft);
+    if (draft && !tooLong && draft.title.trim() && !save.isPending) save.mutate(draft);
   };
   return (
     <div className="space-y-6" data-testid="notes-view">
@@ -1000,10 +1026,12 @@ function Notes({
           {notes.map((note) => (
             <button
               key={note.id}
-              onClick={() => {
-                setSelected(note);
-                setDraft(null);
-              }}
+              onClick={() =>
+                leaveDraft(() => {
+                  setSelected(note);
+                  setDraft(null);
+                })
+              }
               className={`w-full rounded-2xl border p-4 text-left ${selected?.id === note.id ? "border-blue-300 bg-blue-50/40" : "border-slate-200 bg-white hover:border-blue-200"}`}
               data-testid="note-card-item"
             >
@@ -1059,6 +1087,20 @@ function Notes({
                   }
                 }}
               >
+                {pendingLeave && (
+                  <ConfirmDelete
+                    text={da ? "Kassér dine ugemte ændringer?" : "Discard your unsaved edits?"}
+                    yes={da ? "Kassér" : "Discard"}
+                    no={da ? "Bliv her" : "Keep editing"}
+                    onYes={() => {
+                      const action = pendingLeave;
+                      setPendingLeave(null);
+                      action();
+                    }}
+                    onNo={() => setPendingLeave(null)}
+                    testId="note-discard-confirm"
+                  />
+                )}
                 <Input
                   autoFocus={!draft.id}
                   value={draft.title}
@@ -1095,9 +1137,15 @@ function Notes({
                     })
                   }
                 />
+                {tooLong && (
+                  <p role="alert" className="text-sm text-red-700">
+                    {da ? "Titlen må højst have 300 tegn og noten 200.000 tegn."
+                        : "A title can have up to 300 characters and a note up to 200,000."}
+                  </p>
+                )}
                 <div className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-100 pt-4">
                   <span className="text-xs text-slate-400">
-                    {draft.content.length} {da ? "tegn" : "characters"} · Ctrl+S {da ? "gemmer" : "saves"}
+                    {contentLength} {da ? "tegn" : "characters"} · Ctrl+S {da ? "gemmer" : "saves"}
                   </span>
                   <div className="flex gap-2">
                     <Button
@@ -1108,7 +1156,7 @@ function Notes({
                       {t.cancel}
                     </Button>
                     <Button
-                      disabled={!draft.title.trim() || save.isPending}
+                      disabled={tooLong || !draft.title.trim() || save.isPending}
                       onClick={submit}
                       className="bg-blue-600 hover:bg-blue-700"
                       data-testid="note-editor-save-btn"
@@ -2178,7 +2226,9 @@ export default function Home() {
   const [name, setNameState] = useState(() => readStorage("kladde-name") || "");
   const [active, setActiveState] = useState<View>(() => (readStorage("kladde-view") as View) || "overview");
   const [search, setSearch] = useState("");
-  const [selected, setSelected] = useState<Note | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const setSelected = (note: Note | null) => setSelectedId(note?.id ?? null);
+  const [draft, setDraft] = useState<NoteDraft | null>(null);
   const [startNewNote, setStartNewNote] = useState(false);
   const qc = useQueryClient();
   const setLang = (v: Language) => {
@@ -2207,16 +2257,7 @@ export default function Home() {
   useMemo(() => {
     for (const s of data?.subjects || []) subjectColors.set(s.key, s.color);
   }, [data?.subjects]);
-  useEffect(() => {
-    if (!selected && data?.notes[0]) setSelected(data.notes[0]);
-    // Keep the open note in sync after edits elsewhere. A note that is not in the list yet was
-    // just created (the list is refreshing), so it stays open; deleting clears the selection.
-    if (selected && data) {
-      const fresh = data.notes.find((n) => n.id === selected.id);
-      if (fresh && (fresh.updated_at !== selected.updated_at || fresh.is_pinned !== selected.is_pinned))
-        setSelected(fresh);
-    }
-  }, [data, selected]);
+  const selected = data?.notes.find((note) => note.id === selectedId) ?? data?.notes[0] ?? null;
   // Typing in the search box from a page without a list jumps to the notes.
   const onSearch = (v: string) => {
     setSearch(v);
@@ -2314,6 +2355,8 @@ export default function Home() {
               lang={lang}
               search={search}
               selected={selected}
+              draft={draft}
+              setDraft={setDraft}
               setSelected={setSelected}
               refresh={refresh}
               startNew={startNewNote}

@@ -1,11 +1,12 @@
 {
   "name": "kladde",
   "private": true,
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Kladde – noter, lektier og studieplan",
   "type": "module",
   "scripts": {
     "app": "tauri dev",
+    "dist:mac": "bash scripts/prepare-mac.sh && tauri build --target aarch64-apple-darwin --bundles dmg",
     "dist:win": "tauri build --bundles nsis",
     "test": "cargo test --manifest-path src-tauri/Cargo.toml",
     "vite": "vite",

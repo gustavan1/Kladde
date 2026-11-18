@@ -1,9 +1,9 @@
 # Kladde
 
-Kladde is a study app for notes, homework and a weekly study plan. It runs as a normal Windows program in its own window.
+Kladde is a study app for notes, homework and a weekly study plan. It runs on Windows x64 and Apple Silicon Macs.
 
-- **Everything stays on your PC.** There's no account and no login.
-- **AI is optional.** You can switch it on with a free Google Gemini key (see section 4).
+- Notes, homework and plans are saved on your computer. You can use them offline.
+- Optional AI uses Cloudflare Workers AI. On a Mac, you can also sign into ChatGPT for Codex or share selected work with Claude Desktop. See section 4.
 - **It only goes online when you use AI, or for a calendar link that you add yourself** under "Importér fra skole".
 - **Your data is one file** that you can back up and move to another computer.
 
@@ -13,9 +13,18 @@ Kladde is a study app for notes, homework and a weekly study plan. It runs as a 
 
 ### 1. Get the installer
 
-The person who made Kladde for you sends you a file called **`Kladde_1.1.0_x64-setup.exe`** (the numbers may differ). They might send it by email, OneDrive or a USB stick. Save it somewhere easy to find, for example **Downloads**.
+Choose your file from the [Kladde releases](https://github.com/gustavan1/Kladde/releases). If someone sent you the installer, you can use that copy.
+
+| Computer | Download |
+| --- | --- |
+| Windows 10 or 11, x64 | `Kladde_…_x64-setup.exe` |
+| Mac with an Apple chip (M1 or newer), macOS 13 or later | `Kladde_…_aarch64.dmg` |
 
 ### 2. Install Kladde
+
+**Mac.** Open the DMG, drag **Kladde** into **Applications**, eject the disk image and open the app from Applications. This private build uses an ad-hoc signature. If macOS asks you to verify the developer, first try opening Kladde, then go to **System Settings → Privacy & Security → Open Anyway** for Kladde. This applies to this app only. [Apple’s instructions](https://support.apple.com/en-us/102445)
+
+**Windows**
 
 1. Double-click **`Kladde_…_x64-setup.exe`**.
 2. If you see **"Windows protected your PC"**, follow the steps in the next section first.
@@ -36,7 +45,7 @@ Some antivirus programs may also ask about it the first time; choose to allow it
 
 ### 3. Your data, and how to back it up
 
-All your notes, homework and plans are in **one file**:
+On a Mac, use **Finder → Go → Go to Folder** and enter `~/Library/Application Support/Kladde`. The study file is `kladde.json`. On Windows, the same file lives here.
 
 ```
 %APPDATA%\Kladde\kladde.json
@@ -54,39 +63,28 @@ To open the folder, press **Windows key + R**, type `%APPDATA%\Kladde` and press
 **Restore a backup:**
 
 1. Close Kladde.
-2. Open the `%APPDATA%\Kladde` folder.
+2. Open the Kladde data folder for your computer.
 3. Put your backup file there and rename it to exactly `kladde.json`, replacing the old one.
 4. Start Kladde again.
 
 **Move to a new PC:** install Kladde on the new PC and open it once, then close it. Restore your backup as described above.
 
-### 4. AI (optional, free)
+### 4. AI (optional)
 
-Kladde can use Google Gemini for these:
+**Cloudflare on both computers.** Open **AI helper → Set up your free account** (Danish: **AI-hjælper → Opsæt din gratis konto**). Each person can use their own free account and quota. The app walks you through these steps.
 
-- **AI-hjælper** (in the menu): a chat where you can ask about anything in your subjects. It can also help plan your deadlines; it can see your homework.
-  - Pick a subject at the top ("Biologi + mine noter"), and it also reads your notes for that subject.
-- **In your notes:**
-  - Tidy up a messy note, make notes from text you've pasted in, or make a summary.
-  - On a saved note: summarise it, explain the hard parts, or make practice questions.
-  - You always see the result first. Then you choose whether to use it.
-- **Homework → "Planlæg projekt med AI":**
-  - Describe a big assignment and its due date. The AI splits it into steps, each with its own deadline.
-  - Tick the steps you want, and they become tasks.
+1. Create a Cloudflare account, verify your email and stay on Workers Free. You can skip adding a domain or deploying a Worker. [Sign up](https://dash.cloudflare.com/sign-up)
+2. Copy your Account ID from the Cloudflare dashboard. [Find your Account ID](https://developers.cloudflare.com/fundamentals/account/find-account-and-zone-ids/)
+3. In **Workers AI → Use REST API → Create a Workers AI API Token**, select your account and copy the token. A custom token needs Workers AI Read and Edit for that account. [Cloudflare walkthrough](https://developers.cloudflare.com/workers-ai/get-started/rest-api/) · [Manage tokens](https://dash.cloudflare.com/profile/api-tokens)
+4. Paste both values into Kladde and choose **Test and use Cloudflare**. The connection test sends “Say OK”. The token is kept in Windows Credential Manager or macOS Keychain. Backups contain study data only.
 
-**Switch it on (2 minutes):**
+Kladde uses the hosted `@cf/openai/gpt-oss-20b` model. Workers Free includes 10,000 neurons per account per day, resetting at 00:00 UTC. The number of messages this covers varies with the length of the prompts and replies. [Current pricing](https://developers.cloudflare.com/workers-ai/platform/pricing/)
 
-1. Open Kladde and click **AI-hjælper** in the menu.
-2. Click the link **aistudio.google.com/apikey**. It opens in your browser. Sign in with a Google account.
-3. Click **Create API key** and copy the key. It starts with `AIza`.
-4. Back in Kladde, paste the key and click **Gem nøgle**. Kladde checks the key and picks a suitable Gemini model.
+**ChatGPT on Mac.** In **AI helper → AI settings**, choose **Connect and use ChatGPT** and finish the browser sign-in. The bundled Codex client uses your subscription’s Codex access and limits. Choose an available model in the same panel. To switch back, use **Test and use Cloudflare** with your saved account. Both services support the chat, note tools and project planner.
 
-**Good to know:**
+**Claude on Mac.** Move Kladde to Applications first. Install Claude Desktop and sign in with your Claude account. In **AI helper → Claude Desktop**, choose **Add Kladde to Claude Desktop** and quit and reopen Claude Desktop. Select one saved note or homework item in Kladde and click **Share with Claude**. In Claude Desktop, ask “Read my shared Kladde item and suggest a draft note.” Allow the Kladde tool when prompted. Back in Kladde, review the full draft, then choose **Save as new** or **Discard**. **Stop sharing** removes the local snapshot. Shared text that Claude has already read can remain in the Claude conversation. [Download Claude Desktop](https://claude.com/download)
 
-- **The free key has a limit** on how much you can ask per minute and per day. If you see "Gratis-grænsen hos Google er nået", wait a minute, or until the next day.
-- **What gets sent to Google:** when you use AI, the text is sent to Google Gemini (your note, your question, and for the chat your list of homework). On Google's free tier, Google may use it to improve its products. So **don't write personal or sensitive information** in what you send to the AI. Nothing is sent when you don't use AI.
-- **Where the key is stored:** in `%APPDATA%\Kladde\settings.json`. That's a separate file, so it's **not** included in your backups. You can remove it under **AI-hjælper → AI-indstillinger → Fjern nøgle**.
-- **The AI can make mistakes.** Always check what it writes, especially facts and formulas.
+**What the in-app AI receives.** Note tools send the note you are working on. Project planning sends your description and deadline. Chat sends the question, recent messages for the selected subject and provider, and homework context. Selecting a subject also includes excerpts from its notes. Review proposed text and project steps before saving them.
 
 ### Updating and uninstalling
 
@@ -104,18 +102,7 @@ Kladde can use Google Gemini for these:
 
 ## For the developer: making a new installer
 
-The installer is built automatically on GitHub every time you push to `main`.
-
-1. Change the code and push it to `main` on GitHub.
-2. Open the repository on GitHub and click the **Actions** tab. The run **"Build Windows installer"** starts by itself and takes about 10–20 minutes.
-   - To start a build without pushing, click **Build Windows installer**, then **Run workflow**, then **Run workflow** again.
-3. When the run has a green tick, click **Releases** on the repository's main page (in the right-hand column). The newest release is at the top. It's called *Kladde 1.1.0 (build N)*.
-4. Under **Assets**, click **`Kladde_1.1.0_x64-setup.exe`** to download it. Releases don't expire.
-5. Send that file to your friend.
-
-The repository is private, so your friend can't download from GitHub unless you add them as a collaborator. Sending the file is simpler.
-
-If you raise `"version"` in `src-tauri/tauri.conf.json` (for example to `1.0.1`), the installer and release are named with the new number.
+The **Build Kladde installers** GitHub Actions workflow builds a Windows x64 NSIS installer and an Apple Silicon DMG. Pull requests produce downloadable artifacts. A successful push to `main` publishes both installers as release assets. To share an unmerged build, run the workflow for its branch and select **Publish these installers as a prerelease**. You can download the Windows file and send it to your friend if they do not have access to the private repository.
 
 ### Working on the code
 
@@ -126,6 +113,7 @@ You need [Node.js](https://nodejs.org) (LTS) and [Rust](https://rustup.rs). On L
 | `npm install` | Installs the frontend packages (run once) |
 | `npm run app` | Starts Kladde in development mode with live reload |
 | `npm test` | Runs the Rust unit tests (import parser, study plan, weekly summary, data file, calendar links, AI helpers) |
+| `npm run dist:mac` | Fetches the pinned Codex binary and builds the Apple Silicon DMG on an Apple Silicon Mac |
 | `npm run dist:win` | Builds the Windows installer locally (on Windows) into `src-tauri/target/release/bundle/nsis/` |
 
 **Project layout**
@@ -137,9 +125,10 @@ You need [Node.js](https://nodejs.org) (LTS) and [Rust](https://rustup.rs). On L
   - `importers.rs` — CSV, semicolon CSV, JSON, copied Lectio tables and `.ics`.
   - `planner.rs` — the study plan and weekly summary.
   - `feeds.rs` — calendar links.
-  - `ai.rs` — Google Gemini: the chat, note tools and project planner. The key is kept in `settings.json`.
-  - Only `feeds.rs` and `ai.rs` use the internet.
+  - `ai.rs` — hosted AI for the chat, note tools and project planner.
+  - `codex_client.rs` — ChatGPT sign-in and study requests through the bundled Codex app server.
+  - `claude.rs` — Claude Desktop MCP tools, shared snapshots and the draft inbox.
   - `lib.rs` — the window, single instance, outside links and the data folder.
-- `.github/workflows/build-windows.yml` — the automatic Windows build.
+- `.github/workflows/build-windows.yml` — the Windows and Mac builds.
 
-The environment variables `KLADDE_DATA_DIR` (another data folder) and `KLADDE_GEMINI_BASE_URL` (a stand-in Gemini server) are only meant for tests.
+Tests can use `KLADDE_DATA_DIR` for an isolated data folder. On a Mac, run `bash scripts/prepare-mac.sh` before the first development build.

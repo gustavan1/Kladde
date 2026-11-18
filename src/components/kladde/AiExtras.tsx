@@ -1,14 +1,10 @@
-// AI features (Google Gemini): setup, the chat helper, note tools and the project planner.
 import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
   CalendarDays,
   Check,
-  ExternalLink,
-  KeyRound,
   ListChecks,
-  Lock,
   Send,
   Settings2,
   Sparkles,
@@ -22,179 +18,12 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { apiDelete, apiGet, apiPost, errorDetail } from "@/lib/api";
 
+import { AiSetup, useAiStatus, ClaudePanel } from "./Providers";
+
 type Language = "da" | "en";
 type Subject = { id: string; name: string; key: string; color: string };
-export type AiStatus = { configured: boolean; model: string; key_hint: string; models: string[] | null };
 type Message = { id: string; role: "user" | "assistant"; content: string; subject: string; created_at: string };
 type PlanStep = { title: string; deadline: string; estimated_minutes: number; priority: "high" | "medium" | "low" };
-
-export const useAiStatus = () =>
-  useQuery({ queryKey: ["ai-status"], queryFn: () => apiGet<AiStatus>("/ai/status"), staleTime: Infinity });
-
-const KEY_URL = "https://aistudio.google.com/apikey";
-
-function PrivacyNote({ lang }: { lang: Language }) {
-  return (
-    <p className="flex items-start gap-2 text-xs leading-relaxed text-slate-500" data-testid="ai-privacy-note">
-      <Lock className="mt-0.5 size-3.5 shrink-0 text-slate-400" />
-      {lang === "da"
-        ? "Når du bruger AI, sendes teksten (fx din note eller dit spørgsmål) til Google Gemini. På Googles gratis niveau må Google bruge den til at forbedre sine produkter, så skriv ikke personlige eller følsomme oplysninger. Resten af Kladde bliver på din computer."
-        : "When you use AI, the text (e.g. your note or question) is sent to Google Gemini. On Google's free tier, Google may use it to improve its products, so don't write personal or sensitive information. The rest of Kladde stays on your computer."}
-    </p>
-  );
-}
-
-/** Paste-your-key card, and model settings once a key is saved. */
-export function AiSetup({ lang }: { lang: Language }) {
-  const da = lang === "da";
-  const qc = useQueryClient();
-  const status = useAiStatus();
-  const [key, setKey] = useState("");
-  const [models, setModels] = useState<string[] | null>(null);
-  const done = (s: AiStatus) => {
-    qc.setQueryData(["ai-status"], s);
-    if (s.models) setModels(s.models);
-  };
-  const save = useMutation({
-    mutationFn: () => apiPost<AiStatus>("/ai/key", { key }),
-    onSuccess: (s) => {
-      done(s);
-      setKey("");
-      toast.success(da ? `AI er klar (${s.model})` : `AI is ready (${s.model})`);
-    },
-    onError: (e) => toast.error(errorDetail(e, da ? "Nøglen kunne ikke gemmes" : "The key could not be saved")),
-  });
-  const loadModels = useMutation({
-    mutationFn: () => apiGet<AiStatus>("/ai/models"),
-    onSuccess: done,
-    onError: (e) => toast.error(errorDetail(e, da ? "Kunne ikke hente modeller" : "Could not load models")),
-  });
-  const setModel = useMutation({
-    mutationFn: (model: string) => apiPost<AiStatus>("/ai/model", { model }),
-    onSuccess: (s) => {
-      done(s);
-      toast.success(da ? `Model: ${s.model}` : `Model: ${s.model}`);
-    },
-  });
-  const forget = useMutation({
-    mutationFn: () => apiDelete<AiStatus>("/ai/key"),
-    onSuccess: (s) => {
-      done(s);
-      setModels(null);
-      toast.success(da ? "Nøglen er fjernet" : "The key was removed");
-    },
-  });
-  const s = status.data;
-  if (s?.configured) {
-    return (
-      <div className="space-y-3" data-testid="ai-settings">
-        <div className="flex flex-wrap items-center gap-2 text-sm text-slate-600">
-          <KeyRound className="size-4 text-emerald-600" />
-          {da ? "Gemini-nøgle gemt" : "Gemini key saved"} <span className="font-mono text-xs">{s.key_hint}</span>
-          <span className="text-slate-300">·</span>
-          {da ? "Model" : "Model"}
-          {models ? (
-            <select
-              value={s.model}
-              onChange={(e) => setModel.mutate(e.target.value)}
-              className="h-8 rounded-lg border border-slate-200 bg-white px-2 text-xs"
-              data-testid="ai-model-select"
-            >
-              {[s.model, ...models.filter((m) => m !== s.model)].map((m) => (
-                <option key={m} value={m}>
-                  {m}
-                </option>
-              ))}
-            </select>
-          ) : (
-            <button
-              onClick={() => loadModels.mutate()}
-              className="font-mono text-xs text-blue-700 underline-offset-2 hover:underline"
-              title={da ? "Skift model" : "Change model"}
-              data-testid="ai-model-button"
-            >
-              {s.model}
-            </button>
-          )}
-          <Button
-            variant="ghost"
-            size="sm"
-            className="ml-auto text-red-600 hover:bg-red-50"
-            onClick={() => forget.mutate()}
-            data-testid="ai-forget-key"
-          >
-            <Trash2 className="size-3.5" /> {da ? "Fjern nøgle" : "Remove key"}
-          </Button>
-        </div>
-        <PrivacyNote lang={lang} />
-      </div>
-    );
-  }
-  return (
-    <Card className="border-blue-100 shadow-sm" data-testid="ai-setup-card">
-      <CardHeader>
-        <CardTitle className="flex items-center gap-2 font-heading text-lg">
-          <KeyRound className="size-4 text-blue-600" /> {da ? "Slå AI til (gratis)" : "Switch on AI (free)"}
-        </CardTitle>
-        <p className="text-sm text-slate-500">
-          {da
-            ? "Kladde bruger Google Gemini. Du skal bruge en gratis nøgle – det tager 2 minutter:"
-            : "Kladde uses Google Gemini. You need a free key – it takes 2 minutes:"}
-        </p>
-      </CardHeader>
-      <CardContent className="space-y-4">
-        <ol className="list-decimal space-y-1.5 pl-5 text-sm text-slate-600">
-          <li>
-            {da ? "Åbn " : "Open "}
-            <a
-              href={KEY_URL}
-              target="_blank"
-              rel="noreferrer"
-              className="inline-flex items-center gap-1 font-semibold text-blue-700 hover:underline"
-              data-testid="ai-key-link"
-            >
-              aistudio.google.com/apikey <ExternalLink className="size-3" />
-            </a>{" "}
-            {da ? "og log ind med en Google-konto." : "and sign in with a Google account."}
-          </li>
-          <li>{da ? "Klik på “Create API key” og kopiér nøglen." : "Click “Create API key” and copy the key."}</li>
-          <li>{da ? "Indsæt den herunder og klik “Gem nøgle”." : "Paste it below and click “Save key”."}</li>
-        </ol>
-        <form
-          className="flex flex-wrap gap-2"
-          onSubmit={(e) => {
-            e.preventDefault();
-            if (key.trim() && !save.isPending) save.mutate();
-          }}
-        >
-          <Input
-            type="password"
-            value={key}
-            onChange={(e) => setKey(e.target.value)}
-            placeholder="AIza…"
-            autoComplete="off"
-            className="h-10 min-w-0 flex-1 rounded-xl font-mono"
-            data-testid="ai-key-input"
-          />
-          <Button
-            type="submit"
-            disabled={!key.trim() || save.isPending}
-            className="h-10 bg-blue-600 hover:bg-blue-700"
-            data-testid="ai-key-save"
-          >
-            {save.isPending ? (da ? "Tjekker…" : "Checking…") : da ? "Gem nøgle" : "Save key"}
-          </Button>
-        </form>
-        <p className="text-xs text-slate-400">
-          {da
-            ? "Nøglen gemmes kun på denne computer (ikke i backup-filen). Den gratis nøgle har en daglig grænse for, hvor meget du kan spørge."
-            : "The key is only stored on this computer (not in the backup file). The free key has a daily limit on how much you can ask."}
-        </p>
-        <PrivacyNote lang={lang} />
-      </CardContent>
-    </Card>
-  );
-}
 
 /** The AI helper page: chat about anything, with your deadlines (and optionally notes) as context. */
 export function AiView({ lang, subjects }: { lang: Language; subjects: Subject[] }) {
@@ -238,7 +67,7 @@ export function AiView({ lang, subjects }: { lang: Language; subjects: Subject[]
       <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
         <div>
           <p className="flex items-center gap-2 text-sm font-medium text-blue-600">
-            <Sparkles className="size-4" /> LektieHjælper · Gemini
+            <Sparkles className="size-4" /> LektieHjælper{configured && ` · ${status.data?.provider === "codex" ? "ChatGPT" : "Cloudflare"}`}
           </p>
           <h1 className="mt-1 font-heading text-3xl font-semibold tracking-tight text-[#0b1d3a]">
             {da ? "AI-hjælper" : "AI helper"}
@@ -255,6 +84,7 @@ export function AiView({ lang, subjects }: { lang: Language; subjects: Subject[]
           </Button>
         )}
       </div>
+      {status.data?.mac && <ClaudePanel lang={lang} />}
       {!configured ? (
         <AiSetup lang={lang} />
       ) : (

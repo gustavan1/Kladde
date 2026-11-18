@@ -105,6 +105,8 @@ pub struct CalendarFeed {
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 #[serde(default)]
 pub struct ChatMessage {
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub provider: String,
     pub id: String,
     /// "user" | "assistant"
     pub role: String,
@@ -207,7 +209,25 @@ pub struct Store {
     pub data: Data,
 }
 
+/// A private working copy. Dropping it on validation or I/O failure leaves the live store intact.
+pub struct Transaction<'a> {
+    store: &'a mut Store,
+    pub data: Data,
+}
+
+impl Transaction<'_> {
+    pub fn commit(self) -> Result<(), String> {
+        self.store.write(&self.data)?;
+        self.store.data = self.data;
+        Ok(())
+    }
+}
+
 impl Store {
+    pub fn transaction(&mut self) -> Transaction<'_> {
+        Transaction { data: self.data.clone(), store: self }
+    }
+
     /// Opens the data file, creating it (with the default subjects) if it does not exist yet.
     /// A file that cannot be read is never overwritten: an error is returned instead.
     pub fn open(path: &Path) -> Result<Store, String> {
@@ -224,15 +244,15 @@ impl Store {
             Ok(Store { path: path.to_path_buf(), data })
         } else {
             let store = Store { path: path.to_path_buf(), data: Data::default() };
-            store.save()?;
+            store.write(&store.data)?;
             Ok(store)
         }
     }
 
     /// Writes the file safely: first to kladde.json.tmp, then renamed over the real file, so a
     /// crash or power cut never leaves a half-written data file.
-    pub fn save(&self) -> Result<(), String> {
-        let json = to_pretty_json(&self.data)?;
+    fn write(&self, data: &Data) -> Result<(), String> {
+        let json = to_pretty_json(data)?;
         let tmp = self.path.with_extension("json.tmp");
         let write = || -> std::io::Result<()> {
             let mut f = fs::File::create(&tmp)?;
@@ -437,6 +457,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn failed_write_discards_staged_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("kladde.json");
+        let mut store = Store::open(&path).unwrap();
+        let original = store.data.clone();
+        fs::create_dir(path.with_extension("json.tmp")).unwrap();
+        let mut edit = store.transaction();
+        edit.data.notes.push(Note::default());
+        assert!(edit.commit().is_err());
+        assert_eq!(store.data, original);
+        assert_eq!(Store::open(&path).unwrap().data, original);
+        fs::remove_dir(path.with_extension("json.tmp")).unwrap();
+        let mut retry = store.transaction();
+        retry.data.notes.push(Note::default());
+        retry.commit().unwrap();
+        assert_eq!(Store::open(&path).unwrap().data.notes.len(), 1);
+    }
+
+    #[test]
     fn new_file_gets_default_subjects_and_is_written() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("Kladde").join("kladde.json");
@@ -472,7 +511,7 @@ mod tests {
         assert_eq!(store.data.messages[0].content, "hej");
         assert!(store.data.extra.contains_key("future_feature"));
 
-        store.save().unwrap();
+        store.write(&store.data).unwrap();
         let again: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         let original: Value = serde_json::from_str(old).unwrap();
         assert_eq!(again, original, "saving must not change the content");
@@ -503,9 +542,9 @@ mod tests {
         let path = dir.path().join("kladde.json");
         let mut store = Store::open(&path).unwrap();
         store.data.notes.push(Note { id: "n".into(), title: "Ny".into(), ..Default::default() });
-        store.save().unwrap();
+        store.write(&store.data).unwrap();
         store.data.notes[0].title = "Ændret".into();
-        store.save().unwrap();
+        store.write(&store.data).unwrap();
         let text = fs::read_to_string(&path).unwrap();
         assert!(text.contains("Ændret"));
         assert!(text.contains("\n  \"version\": 1"), "2-space pretty JSON");

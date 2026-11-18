@@ -9,7 +9,7 @@ use serde_json::{json, Value};
 use tauri::{AppHandle, Manager};
 
 use crate::commands::{minutes_between, AppState};
-use crate::importers::{guess_subject, is_deadline_event, parse_ics};
+use crate::importers::{ext_id, guess_subject, is_deadline_event, parse_ics};
 use crate::store::{add_days, day_name, local_date, new_id, now_iso, Block, CalendarFeed, Data, Store, Task};
 
 /// webcal:// becomes https://, and a missing scheme gets https://.
@@ -64,7 +64,7 @@ fn timed_out(err: &(dyn std::error::Error + 'static)) -> bool {
 
 /// Downloads a calendar. Error messages never contain the link itself, because calendar links
 /// often include a private token.
-fn fetch_calendar(url: &str, da: bool) -> Result<String, String> {
+pub(crate) fn fetch_calendar(url: &str, da: bool) -> Result<String, String> {
     use std::io::Read;
     let timeout_msg = || if da { "Kalenderen svarede ikke i tide." } else { "The calendar did not answer in time." }.to_string();
     let agent = ureq::AgentBuilder::new()
@@ -126,16 +126,49 @@ pub fn apply_sync(data: &mut Data, feed_id: &str, fetched: Result<String, String
         if !text.contains("BEGIN:VCALENDAR") {
             return Err(if da { "Linket gav ikke en kalender (.ics)." } else { "The link did not return a calendar (.ics)." }.into());
         }
-        let events = parse_ics(&text);
+        let events = parse_ics(&text, now.date_naive()).map_err(|reason| {
+            if da { format!("Kalenderen kunne ikke læses: {reason}") } else { format!("Could not read calendar: {reason}") }
+        })?;
         let known: Vec<String> = data.subjects.iter().map(|s| s.name.clone()).collect();
         let source = format!("feed:{feed_id}");
         // Deadlines: everything from yesterday and half a year ahead.
         let (from, to) = (add_days(&today, -1), add_days(&today, 180));
-        for e in events.iter().filter(|e| is_deadline_event(e) && e.date >= from && e.date <= to) {
-            let ext: String = format!("{source}:{}:{}", e.uid, e.date).chars().take(200).collect();
-            if data.tasks.iter().any(|t| t.external_id.as_deref() == Some(ext.as_str())) {
+        for e in events.iter().filter(|e| is_deadline_event(e)) {
+            let ext = format!("{source}:event:{}", ext_id(&[Some(&e.uid), e.recurrence_id.as_deref()]));
+            let legacy_prefix = format!("{source}:{}:", e.uid);
+            // A previous release stored UID + date, even for a single movable event.
+            // A recurring series uses a distinct identity for each original occurrence.
+            let matches = |task: &Task| {
+                let Some(id) = &task.external_id else { return false };
+                if id == &ext { return true }
+                if let Some(date) = id.strip_prefix(&legacy_prefix) {
+                    return crate::store::is_valid_date(date) && (e.recurrence_id.is_none() || date == e.date);
+                }
+                // Old releases truncated long feed identifiers at 200 characters.
+                id.chars().count() == 200 && e.recurrence_id.is_none()
+                    && format!("{legacy_prefix}{}", task.deadline).chars().take(200).eq(id.chars())
+            };
+            // If older syncs already made copies, keep the most advanced task and its edits.
+            let survivor = data.tasks.iter().filter(|t| matches(t)).min_by_key(|t| match t.status.as_str() {
+                "done" => 0, "doing" => 1, _ => 2,
+            }).map(|t| t.id.clone());
+            if let Some(id) = survivor {
+                let mut removed = std::collections::HashSet::new();
+                data.tasks.retain(|t| {
+                    if t.id != id && matches(t) { removed.insert(t.id.clone()); false } else { true }
+                });
+                for block in data.blocks.iter_mut().filter(|b| b.source.as_deref() == Some("plan")) {
+                    if block.external_id.as_ref().is_some_and(|old| removed.contains(old)) {
+                        block.external_id = Some(id.clone());
+                    }
+                }
+                let task = data.tasks.iter_mut().find(|t| t.id == id).expect("retained task");
+                task.external_id = Some(ext);
+                task.title = e.summary.clone();
+                task.deadline = e.date.clone();
                 continue;
             }
+            if e.date < from || e.date > to { continue }
             let (subject, _) = data.ensure_subject(&guess_subject(&format!("{} {}", e.summary, e.description), &known));
             data.tasks.push(Task {
                 id: new_id(),
@@ -207,28 +240,29 @@ pub fn apply_sync(data: &mut Data, feed_id: &str, fetched: Result<String, String
 }
 
 /// Downloads one feed and saves the result. The data is not locked while downloading.
-pub fn sync_feed_blocking(store: &Mutex<Store>, feed_id: &str, da: bool) -> Option<Value> {
+pub fn sync_feed_blocking(store: &Mutex<Store>, feed_id: &str, da: bool) -> Result<Option<Value>, String> {
     let url = {
         let s = store.lock().unwrap_or_else(|p| p.into_inner());
-        s.data.feeds.iter().find(|f| f.id == feed_id)?.url.clone()
+        let Some(feed) = s.data.feeds.iter().find(|f| f.id == feed_id) else { return Ok(None) };
+        feed.url.clone()
     };
     let fetched = fetch_calendar(&url, da);
     let mut s = store.lock().unwrap_or_else(|p| p.into_inner());
-    let result = apply_sync(&mut s.data, feed_id, fetched, da, &Local::now());
-    if let Err(e) = s.save() {
-        crate::log(&format!("Saving after calendar sync failed: {e}"));
+    let mut transaction = s.transaction();
+    let result = apply_sync(&mut transaction.data, feed_id, fetched, da, &Local::now());
+    if result.is_some() {
+        transaction.commit()?;
     }
-    result
+    Ok(result)
 }
 
-pub async fn sync_feed(app: AppHandle, feed_id: String, da: bool) -> Option<Value> {
+pub async fn sync_feed(app: AppHandle, feed_id: String, da: bool) -> Result<Option<Value>, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
         sync_feed_blocking(&state.store, &feed_id, da)
     })
     .await
-    .ok()
-    .flatten()
+    .map_err(|e| e.to_string())?
 }
 
 /// Re-checks calendar links every 3 hours while Kladde is running.
@@ -256,7 +290,9 @@ pub fn start_auto_sync(app: AppHandle) {
             };
             for id in due {
                 let state = app.state::<AppState>();
-                sync_feed_blocking(&state.store, &id, true);
+                if let Err(e) = sync_feed_blocking(&state.store, &id, true) {
+                    crate::log(&format!("Calendar sync failed: {e}"));
+                }
             }
             std::thread::sleep(Duration::from_secs(15 * 60));
         }
@@ -295,7 +331,7 @@ mod tests {
         assert_eq!(t.subject, "Engelsk");
         assert_eq!(t.deadline, "2026-11-25");
         assert_eq!(t.priority, "medium");
-        assert_eq!(t.external_id.as_deref(), Some("feed:f1:essay@x:2026-11-25"));
+        assert!(t.external_id.as_ref().unwrap().starts_with("feed:f1:event:"));
         let lessons: Vec<&Block> = d.blocks.iter().filter(|b| b.source.as_deref() == Some("feed:f1")).collect();
         assert_eq!(lessons.len(), 1);
         assert_eq!((lessons[0].day.as_str(), lessons[0].time.as_str(), lessons[0].minutes), ("Torsdag", "08:15", Some(90)));
@@ -313,6 +349,38 @@ mod tests {
         let again = apply_sync(&mut d, "f1", Ok(ICS.into()), true, &now).unwrap();
         assert_eq!((again["new_tasks"].as_i64(), again["new_blocks"].as_i64()), (Some(0), Some(0)));
         assert_eq!(d.tasks.len(), 1);
+    }
+
+    #[test]
+    fn rescheduled_legacy_deadline_keeps_progress_and_updates_in_place() {
+        let (mut d, now) = setup();
+        d.tasks.push(Task { id: "original".into(), status: "doing".into(), deadline: "2026-11-23".into(),
+            external_id: Some("feed:f1:essay@x:2026-11-23".into()), ..Default::default() });
+        d.tasks.push(Task { id: "duplicate".into(), deadline: "2026-11-24".into(),
+            external_id: Some("feed:f1:essay@x:2026-11-24".into()), ..Default::default() });
+        d.blocks.push(Block { source: Some("plan".into()), external_id: Some("duplicate".into()), ..Default::default() });
+        for date in ["20261125", "20261127"] {
+            let text = ICS.replace("20261125", date);
+            let result = apply_sync(&mut d, "f1", Ok(text), false, &now).unwrap();
+            assert_eq!(result["new_tasks"], 0);
+        }
+        assert_eq!(d.tasks.len(), 1);
+        assert!(d.blocks.iter().any(|b| b.source.as_deref() == Some("plan") && b.external_id.as_deref() == Some("original")));
+        let task = &d.tasks[0];
+        assert_eq!((&*task.id, &*task.status, &*task.deadline, &*task.title),
+                   ("original", "doing", "2026-11-27", "Aflevering: Engelsk essay"));
+    }
+
+    #[test]
+    fn weekly_series_honors_exclusions_and_moved_occurrences() {
+        let (mut d, now) = setup();
+        let ics = "BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:class\nSUMMARY:Biologi\nDTSTART:20260902T090000\nDTEND:20260902T100000\nRRULE:FREQ=WEEKLY;BYDAY=WE,TH,FR\nEXDATE:20261119T090000\nEND:VEVENT\nBEGIN:VEVENT\nUID:class\nRECURRENCE-ID:20261120T090000\nDTSTART:20261120T120000\nSUMMARY:Biologi ekstra\nEND:VEVENT\nEND:VCALENDAR";
+        let r = apply_sync(&mut d, "f1", Ok(ics.into()), false, &now).unwrap();
+        assert_eq!(r["feed"]["last_status"], "ok");
+        let blocks: Vec<_> = d.blocks.iter().filter(|b| b.source.as_deref() == Some("feed:f1")).collect();
+        assert_eq!(blocks.len(), 2);
+        assert!(blocks.iter().any(|b| b.day == "Onsdag" && b.minutes == Some(60)));
+        assert!(blocks.iter().any(|b| b.day == "Fredag" && b.time == "12:00"));
     }
 
     #[test]
