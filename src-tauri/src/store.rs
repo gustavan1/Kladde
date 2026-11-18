@@ -105,6 +105,7 @@ pub struct CalendarFeed {
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 #[serde(default)]
 pub struct ChatMessage {
+    pub provider: String,
     pub id: String,
     /// "user" | "assistant"
     pub role: String,

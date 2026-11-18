@@ -1,9 +1,5 @@
-//! AI features through the Google Gemini API.
-//!
-//! The API key is kept in settings.json next to kladde.json, never inside kladde.json, so it
-//! is not part of backups. Nothing is sent to Google unless the user uses an AI feature.
-
-use std::path::{Path, PathBuf};
+//! Hosted study tools. Cloudflare credentials are stored by the OS. Codex owns ChatGPT sign-in.
+use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -15,235 +11,287 @@ use tauri::{AppHandle, Manager};
 use crate::commands::{err, is_da, str_of, tr, ApiErr, AppState, Res};
 use crate::store::{add_days, is_valid_date, local_date, new_id, now_iso, ChatMessage, Data};
 
-const DEFAULT_MODEL: &str = "gemini-2.5-flash";
+const CF_MODEL: &str = "@cf/openai/gpt-oss-20b";
 
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[derive(Serialize, Deserialize, Clone, Default)]
 #[serde(default)]
 pub struct AiSettings {
-    pub gemini_api_key: String,
-    pub gemini_model: String,
+    account: String,
+    use_codex: bool,
+    codex_model: String,
 }
 
 pub struct AiState {
-    pub path: PathBuf,
-    pub settings: Mutex<AiSettings>,
+    path: PathBuf,
+    settings: Mutex<AiSettings>,
 }
 
 impl AiState {
-    pub fn load(path: PathBuf) -> AiState {
-        let settings = std::fs::read_to_string(&path)
+    pub fn load(path: PathBuf) -> Self {
+        let settings = std::fs::read(&path)
             .ok()
-            .and_then(|t| serde_json::from_str(&t).ok())
+            .and_then(|v| serde_json::from_slice(&v).ok())
             .unwrap_or_default();
-        AiState { path, settings: Mutex::new(settings) }
-    }
-
-    fn get(&self) -> AiSettings {
-        self.settings.lock().unwrap_or_else(|p| p.into_inner()).clone()
-    }
-
-    fn save(&self, s: AiSettings) -> Result<(), String> {
-        let mut settings = self.settings.lock().unwrap_or_else(|p| p.into_inner());
-        write_settings(&self.path, &s)?;
-        *settings = s;
-        Ok(())
-    }
-}
-
-fn write_settings(path: &Path, s: &AiSettings) -> Result<(), String> {
-    let tmp = path.with_extension("json.tmp");
-    let json = serde_json::to_string_pretty(s).map_err(|e| e.to_string())?;
-    std::fs::write(&tmp, json).and_then(|_| std::fs::rename(&tmp, path)).map_err(|e| e.to_string())
-}
-
-fn base_url() -> String {
-    #[cfg(debug_assertions)]
-    if let Ok(url) = std::env::var("KLADDE_GEMINI_BASE_URL") {
-        return url;
-    }
-    "https://generativelanguage.googleapis.com".into()
-}
-
-fn agent() -> ureq::Agent {
-    ureq::AgentBuilder::new().redirects(0).timeout(Duration::from_secs(90)).user_agent("Kladde").build()
-}
-
-/// Turns a failed Gemini request into a friendly message (never containing the key).
-pub fn gemini_error(status: Option<u16>, body: &str, lang: &Option<String>) -> ApiErr {
-    let lower = body.to_lowercase();
-    let (code, da, en) = match status {
-        Some(400) if lower.contains("api key") || lower.contains("api_key") => {
-            (401, "API-nøglen virker ikke. Tjek at den er kopieret helt (se AI-indstillinger).", "The API key does not work. Check that it was copied completely (see AI settings).")
+        Self {
+            path,
+            settings: Mutex::new(settings),
         }
-        Some(401) | Some(403) => (401, "API-nøglen har ikke adgang til Gemini. Lav en ny nøgle i Google AI Studio.", "The API key has no access to Gemini. Create a new key in Google AI Studio."),
-        Some(404) => (404, "AI-modellen findes ikke længere. Vælg en anden model i AI-indstillinger.", "The AI model no longer exists. Choose another model in AI settings."),
-        Some(429) => (429, "Googles kvote er nået. Tjek projektets grænser i AI Studio.", "Google's quota has been reached. Check the project limits in AI Studio."),
-        Some(400) if lower.contains("location") || lower.contains("region") => (400, "Gemini er ikke tilgængelig i dit land med denne nøgle.", "Gemini is not available in your country with this key."),
-        Some(400) => (400, "Gemini kunne ikke bruge forespørgslen. Prøv med en kortere tekst.", "Gemini could not use the request. Try a shorter text."),
-        Some(s) if s >= 500 => (503, "Gemini er overbelastet lige nu. Prøv igen om lidt.", "Gemini is overloaded right now. Try again in a moment."),
-        Some(_) => (502, "Gemini svarede med en fejl. Prøv igen.", "Gemini answered with an error. Try again."),
-        None => (503, "Ingen forbindelse til Gemini. Tjek internettet.", "No connection to Gemini. Check the internet connection."),
-    };
-    err(code, tr(lang, da, en))
-}
-
-fn call(req: ureq::Request, body: Option<&Value>, lang: &Option<String>) -> Res<Value> {
-    let result = match body {
-        Some(b) => req.send_json(b.clone()),
-        None => req.call(),
-    };
-    match result {
-        Ok(resp) => resp.into_json::<Value>().map_err(|_| gemini_error(Some(502), "", lang)),
-        Err(ureq::Error::Status(code, resp)) => Err(gemini_error(Some(code), &resp.into_string().unwrap_or_default(), lang)),
-        Err(ureq::Error::Transport(_)) => Err(gemini_error(None, "", lang)),
+    }
+    fn get(&self) -> AiSettings {
+        self.settings
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+    fn update(&self, change: impl FnOnce(&mut AiSettings)) -> Res<Value> {
+        let mut guard = self.settings.lock().unwrap_or_else(|p| p.into_inner());
+        let mut next = guard.clone();
+        change(&mut next);
+        let tmp = self.path.with_extension("tmp");
+        std::fs::write(
+            &tmp,
+            serde_json::to_vec(&next).map_err(|e| err(500, e.to_string()))?,
+        )
+        .and_then(|_| std::fs::rename(tmp, &self.path))
+        .map_err(|e| err(500, e.to_string()))?;
+        *guard = next;
+        Ok(status(&guard))
     }
 }
 
-/// Gets the text out of a generateContent answer.
-pub fn response_text(v: &Value, lang: &Option<String>) -> Res<String> {
-    let parts = v["candidates"][0]["content"]["parts"].as_array();
-    let text: String = parts
-        .map(|ps| ps.iter().filter(|p| p["thought"] != json!(true)).filter_map(|p| p["text"].as_str()).collect::<Vec<_>>().join(""))
-        .unwrap_or_default();
-    if text.trim().is_empty() {
-        let blocked = v["promptFeedback"]["blockReason"].is_string()
-            || matches!(v["candidates"][0]["finishReason"].as_str(), Some("SAFETY" | "PROHIBITED_CONTENT" | "BLOCKLIST" | "RECITATION"));
-        return Err(if blocked {
-            err(422, tr(lang, "Gemini ville ikke svare på det. Prøv at formulere det anderledes.", "Gemini declined to answer that. Try phrasing it differently."))
-        } else {
-            err(502, tr(lang, "Gemini sendte et tomt svar. Prøv igen.", "Gemini sent an empty answer. Try again."))
-        });
-    }
-    Ok(text.trim().to_string())
+fn status(s: &AiSettings) -> Value {
+    let codex = cfg!(target_os = "macos") && s.use_codex;
+    json!({"configured":if codex { !s.codex_model.is_empty() } else { !s.account.is_empty() },
+        "provider":if codex {"codex"} else {"cloudflare"}, "mac":cfg!(target_os="macos"), "codex_connected":!s.codex_model.is_empty(),
+        "model":if codex { &s.codex_model } else { CF_MODEL }, "account":s.account})
 }
 
-/// One generateContent call. `contents` is the conversation; `schema` asks for JSON output.
-fn generate(settings: &AiSettings, system: &str, contents: Vec<Value>, schema: Option<Value>, lang: &Option<String>) -> Res<String> {
-    let model = if settings.gemini_model.is_empty() { DEFAULT_MODEL } else { &settings.gemini_model };
-    let url = format!("{}/v1beta/models/{}:generateContent", base_url(), model);
-    let mut body = json!({
-        "systemInstruction": { "parts": [{ "text": system }] },
-        "contents": contents,
-    });
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn credential(account: &str) -> Res<keyring::Entry> {
+    keyring::Entry::new("dk.kladde.app.cloudflare", account)
+        .map_err(|e| err(500, format!("Credential store: {e}")))
+}
+fn token(account: &str, change: Option<&str>) -> Res<String> {
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    {
+        let entry = credential(account)?;
+        let result = match change {
+            Some("") => match entry.delete_credential() {
+                Ok(()) | Err(keyring::Error::NoEntry) => Ok(String::new()),
+                Err(e) => Err(e),
+            },
+            Some(value) => entry.set_password(value).map(|_| String::new()),
+            None => entry.get_password(),
+        };
+        result.map_err(|e| err(500, format!("Credential store: {e}")))
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let _ = (account, change);
+        Err(err(400, "Credential storage requires Windows or macOS."))
+    }
+}
+
+fn cf_error(code: u16, lang: &Option<String>) -> ApiErr {
+    let (da, en) = match code {
+        401 | 403 => (
+            "Tjek dit Account ID og tokenets Workers AI-tilladelser.",
+            "Check your Account ID and your token’s Workers AI permissions.",
+        ),
+        404 => (
+            "Account ID eller model blev ikke fundet.",
+            "Cloudflare could not find the account or model.",
+        ),
+        429 => (
+            "Cloudflares grænse er nået. Tjek dit forbrug i dashboardet.",
+            "Cloudflare’s quota or rate limit was reached. Check usage in your dashboard.",
+        ),
+        0 => (
+            "Kunne ikke forbinde til Cloudflare. Tjek internetforbindelsen.",
+            "Could not reach Cloudflare. Check your connection.",
+        ),
+        _ => (
+            "Cloudflare kunne ikke behandle forespørgslen.",
+            "Cloudflare could not process the request.",
+        ),
+    };
+    err(if code == 0 { 503 } else { code }, tr(lang, da, en))
+}
+
+fn cloudflare_at(
+    url: &str,
+    key: &str,
+    system: &str,
+    messages: Vec<Value>,
+    schema: Option<Value>,
+    lang: &Option<String>,
+) -> Res<String> {
+    let mut chat = vec![json!({"role":"system","content":system})];
     if let Some(schema) = schema {
-        body["generationConfig"] = json!({ "responseMimeType": "application/json", "responseSchema": schema });
+        chat.push(json!({"role":"system","content":format!("Return only a JSON object matching this schema: {schema}")}));
     }
-    let req = agent().post(&url).set("x-goog-api-key", &settings.gemini_api_key);
-    let v = call(req, Some(&body), lang)?;
-    response_text(&v, lang)
+    chat.extend(messages);
+    let response = ureq::AgentBuilder::new()
+        .redirects(0)
+        .timeout(Duration::from_secs(120))
+        .build()
+        .post(url)
+        .set("Authorization", &format!("Bearer {key}"))
+        .send_json(json!({"model":CF_MODEL,"messages":chat,"max_tokens":4096,"stream":false}))
+        .map_err(|e| match e {
+            ureq::Error::Status(code, _) => cf_error(code, lang),
+            _ => cf_error(0, lang),
+        })?;
+    let body: Value = response.into_json().map_err(|_| cf_error(502, lang))?;
+    body["choices"][0]["message"]["content"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .ok_or_else(|| cf_error(502, lang))
 }
 
-/// Picks the best general model from the list the key can use: the newest stable "flash".
-pub fn choose_models(list: &Value) -> (Vec<String>, Option<String>) {
-    let skip = ["image", "tts", "audio", "live", "embedding", "vision", "robotics", "computer", "aqa", "learnlm", "gemma"];
-    let mut models: Vec<String> = list["models"]
-        .as_array()
-        .map(|a| {
-            a.iter()
-                .filter(|m| m["supportedGenerationMethods"].as_array().is_some_and(|s| s.iter().any(|x| x == "generateContent")))
-                .filter_map(|m| m["name"].as_str().map(|n| n.trim_start_matches("models/").to_string()))
-                .filter(|n| n.starts_with("gemini-") && !skip.iter().any(|s| n.contains(s)))
-                .collect()
-        })
-        .unwrap_or_default();
-    let version = |n: &str| n.trim_start_matches("gemini-").split('-').next().and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
-    let unstable = |n: &str| n.contains("preview") || n.contains("exp") || n.ends_with("-latest");
-    models.sort_by(|a, b| version(b).partial_cmp(&version(a)).unwrap_or(std::cmp::Ordering::Equal).then(a.cmp(b)));
-    models.dedup();
-    let best = models
-        .iter()
-        .find(|n| n.contains("flash") && !n.contains("lite") && !unstable(n))
-        .or_else(|| models.iter().find(|n| n.contains("flash") && !unstable(n)))
-        .or_else(|| models.iter().find(|n| n.contains("flash")))
-        .or_else(|| models.iter().find(|n| !unstable(n)))
-        .or_else(|| models.first())
-        .cloned();
-    (models, best)
+fn cf_url(account: &str) -> String {
+    format!("https://api.cloudflare.com/client/v4/accounts/{account}/ai/v1/chat/completions")
 }
 
-fn list_models(key: &str, lang: &Option<String>) -> Res<Value> {
-    let req = agent().get(&format!("{}/v1beta/models?pageSize=200", base_url())).set("x-goog-api-key", key);
-    call(req, None, lang)
-}
-
-fn status_json(s: &AiSettings, models: Option<Vec<String>>) -> Value {
-    let key = s.gemini_api_key.trim();
-    let hint = if key.len() > 4 { format!("…{}", &key[key.len() - 4..]) } else { String::new() };
-    json!({
-        "configured": !key.is_empty(),
-        "model": if s.gemini_model.is_empty() { DEFAULT_MODEL } else { &s.gemini_model },
-        "key_hint": hint,
-        "models": models,
-    })
-}
-
-fn ai_state(app: &AppHandle) -> tauri::State<'_, AiState> {
-    app.state::<AiState>()
-}
-
-fn need_key(app: &AppHandle, lang: &Option<String>) -> Res<AiSettings> {
-    let s = ai_state(app).get();
-    if s.gemini_api_key.trim().is_empty() {
-        return Err(err(428, tr(lang, "AI er ikke sat op endnu. Indsæt din Gemini-nøgle under AI-hjælper.", "AI is not set up yet. Add your Gemini key under AI helper.")));
+fn generate(
+    app: &AppHandle,
+    s: &AiSettings,
+    system: &str,
+    messages: Vec<Value>,
+    schema: Option<Value>,
+    lang: &Option<String>,
+) -> Res<String> {
+    if s.use_codex && cfg!(target_os = "macos") {
+        return crate::codex_client::answer(app, &s.codex_model, system, messages, schema)
+            .map_err(Into::into);
     }
-    Ok(s)
+    if s.account.is_empty() {
+        return Err(err(
+            428,
+            tr(
+                lang,
+                "Opsæt Cloudflare i AI-indstillinger.",
+                "Set up Cloudflare in AI settings.",
+            ),
+        ));
+    }
+    cloudflare_at(
+        &cf_url(&s.account),
+        &token(&s.account, None)?,
+        system,
+        messages,
+        schema,
+        lang,
+    )
 }
 
 async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Res<T> + Send + 'static) -> Res<T> {
-    tauri::async_runtime::spawn_blocking(f).await.map_err(|e| err(500, e.to_string()))?
+    tauri::async_runtime::spawn_blocking(f)
+        .await
+        .map_err(|e| err(500, e.to_string()))?
 }
-
-// ---------- Commands ----------
-
 #[tauri::command]
 pub fn ai_status(app: AppHandle) -> Res<Value> {
-    Ok(status_json(&ai_state(&app).get(), None))
+    Ok(status(&app.state::<AiState>().get()))
 }
 
-/// Checks the key with Google, picks a model and saves both.
 #[tauri::command]
-pub async fn ai_save_key(app: AppHandle, lang: Option<String>, body: Value) -> Res<Value> {
-    let key: String = str_of(body.get("key"), 200).trim().chars().filter(|c| !c.is_whitespace()).collect();
-    if key.len() < 20 {
-        return Err(err(400, tr(&lang, "Det ligner ikke en API-nøgle. Kopiér hele nøglen fra Google AI Studio.", "That does not look like an API key. Copy the whole key from Google AI Studio.")));
+pub async fn ai_save_key(app: AppHandle, body: Value, lang: Option<String>) -> Res<Value> {
+    let account = body["account"].as_str().unwrap_or("").trim().to_owned();
+    let key = body["key"].as_str().unwrap_or("").trim().to_owned();
+    if account.len() != 32 || !account.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(err(
+            400,
+            tr(
+                &lang,
+                "Account ID skal være 32 hexadecimale tegn.",
+                "Account ID must contain 32 hexadecimal characters.",
+            ),
+        ));
     }
-    let l = lang.clone();
-    let k = key.clone();
-    let list = blocking(move || list_models(&k, &l)).await?;
-    let (models, best) = choose_models(&list);
-    let model = best.ok_or_else(|| err(422, tr(&lang, "Google viste ingen kompatibel tekstmodel til nøglen.", "Google listed no compatible text model for this key.")))?;
-    let settings = AiSettings { gemini_api_key: key, gemini_model: model };
-    ai_state(&app).save(settings.clone())?;
-    Ok(status_json(&settings, Some(models)))
+    blocking(move || {
+        let key = if key.is_empty() {
+            token(&account, None)?
+        } else {
+            key
+        };
+        cloudflare_at(
+            &cf_url(&account),
+            &key,
+            "Reply briefly.",
+            vec![json!({"role":"user","content":"Say OK."})],
+            None,
+            &lang,
+        )?;
+        token(&account, Some(&key))?;
+        let state = app.state::<AiState>();
+        let old = state.get().account;
+        let status = state.update(|s| {
+            s.account = account.clone();
+            s.use_codex = false;
+        })?;
+        if !old.is_empty() && old != account {
+            token(&old, Some(""))?;
+        }
+        Ok(status)
+    })
+    .await
 }
 
 #[tauri::command]
-pub async fn ai_models(app: AppHandle, lang: Option<String>) -> Res<Value> {
-    let s = need_key(&app, &lang)?;
-    let l = lang.clone();
-    let list = blocking(move || list_models(&s.gemini_api_key, &l)).await?;
-    let (models, _) = choose_models(&list);
-    Ok(status_json(&ai_state(&app).get(), Some(models)))
+pub async fn ai_forget_key(app: AppHandle) -> Res<Value> {
+    blocking(move || {
+        let state = app.state::<AiState>();
+        let account = state.get().account;
+        if !account.is_empty() {
+            token(&account, Some(""))?;
+        }
+        state.update(|s| s.account.clear())
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn ai_set_model(app: AppHandle, body: Value) -> Res<Value> {
-    let model = str_of(body.get("model"), 100);
-    let state = ai_state(&app);
-    let mut s = state.get();
-    if model.starts_with("gemini-") {
-        s.gemini_model = model;
-        state.save(s.clone())?;
+pub async fn ai_codex(app: AppHandle, body: Value) -> Res<Value> {
+    if !cfg!(target_os = "macos") {
+        return Err(err(400, "Codex is available in the Mac edition."));
     }
-    Ok(status_json(&s, None))
-}
-
-#[tauri::command]
-pub fn ai_forget_key(app: AppHandle) -> Res<Value> {
-    let state = ai_state(&app);
-    let s = AiSettings::default();
-    state.save(s.clone())?;
-    Ok(status_json(&s, None))
+    blocking(move || {
+        let state = app.state::<AiState>();
+        match body["action"].as_str() {
+            Some("cloudflare") => state.update(|s| s.use_codex = false),
+            Some("logout") => {
+                crate::codex_client::logout(&app)?;
+                state.update(|s| {
+                    s.codex_model.clear();
+                    s.use_codex = false;
+                })
+            }
+            Some(action @ ("connect" | "models" | "select")) => {
+                let models = crate::codex_client::models(&app, action == "connect")?;
+                let requested = body["model"].as_str().unwrap_or("");
+                let current = state.get().codex_model;
+                let model = if action == "select" {
+                    models
+                        .iter()
+                        .find(|m| m.as_str() == requested)
+                        .ok_or_else(|| err(400, "Model unavailable"))?
+                } else {
+                    models.iter().find(|m| **m == current).unwrap_or(&models[0])
+                };
+                let mut out = state.update(|s| {
+                    s.use_codex = true;
+                    s.codex_model = model.clone();
+                })?;
+                out["models"] = json!(models);
+                Ok(out)
+            }
+            _ => Err(err(400, "Unknown Codex action")),
+        }
+    })
+    .await
 }
 
 const PLAIN_TEXT: &str = "Write plain text for a simple text box: no Markdown (no #, no ** or __), no tables. Use short paragraphs, headings as their own line ending with a colon, and lists with \"- \". Formulas in plain text, e.g. f'(x) = 2x.";
@@ -262,17 +310,32 @@ pub fn note_prompt(action: &str, da: bool) -> Option<&'static str> {
 
 #[tauri::command]
 pub async fn ai_note(app: AppHandle, lang: Option<String>, body: Value) -> Res<Value> {
-    let s = need_key(&app, &lang)?;
+    let s = app.state::<AiState>().get();
+    let provider_app = app.clone();
     let action = str_of(body.get("action"), 20);
     let Some(task) = note_prompt(&action, is_da(&lang)) else {
         return Err(err(400, "Unknown action"));
     };
     let content = body["content"].as_str().unwrap_or("");
     if content.chars().count() > 60_000 {
-        return Err(err(400, tr(&lang, "AI kan behandle op til 60.000 tegn ad gangen.", "AI can process up to 60,000 characters at a time.")));
+        return Err(err(
+            400,
+            tr(
+                &lang,
+                "AI kan behandle op til 60.000 tegn ad gangen.",
+                "AI can process up to 60,000 characters at a time.",
+            ),
+        ));
     }
     if content.trim().len() < 20 {
-        return Err(err(400, tr(&lang, "Skriv eller indsæt lidt mere tekst først.", "Write or paste a bit more text first.")));
+        return Err(err(
+            400,
+            tr(
+                &lang,
+                "Skriv eller indsæt lidt mere tekst først.",
+                "Write or paste a bit more text first.",
+            ),
+        ));
     }
     let title = str_of(body.get("title"), 300);
     let subject = str_of(body.get("subject"), 60);
@@ -281,7 +344,17 @@ pub async fn ai_note(app: AppHandle, lang: Option<String>, body: Value) -> Res<V
     );
     let user = format!("Subject: {subject}\nNote title: {title}\n\n<note>\n{content}\n</note>");
     let l = lang.clone();
-    let text = blocking(move || generate(&s, &system, vec![json!({ "role": "user", "parts": [{ "text": user }] })], None, &l)).await?;
+    let text = blocking(move || {
+        generate(
+            &provider_app,
+            &s,
+            &system,
+            vec![json!({ "role": "user", "content": user })],
+            None,
+            &l,
+        )
+    })
+    .await?;
     Ok(json!({ "text": text }))
 }
 
@@ -301,7 +374,12 @@ pub fn clean_steps(raw: &Value, today: &str, deadline: &str) -> Vec<PlanStep> {
         .map(|a| {
             a.iter()
                 .filter_map(|s| {
-                    let title = s["title"].as_str()?.trim().chars().take(200).collect::<String>();
+                    let title = s["title"]
+                        .as_str()?
+                        .trim()
+                        .chars()
+                        .take(200)
+                        .collect::<String>();
                     if title.is_empty() {
                         return None;
                     }
@@ -317,7 +395,12 @@ pub fn clean_steps(raw: &Value, today: &str, deadline: &str) -> Vec<PlanStep> {
                         Some(p @ ("high" | "medium" | "low")) => p.to_string(),
                         _ => "medium".to_string(),
                     };
-                    Some(PlanStep { title, deadline: date, estimated_minutes: minutes.clamp(10, 600), priority })
+                    Some(PlanStep {
+                        title,
+                        deadline: date,
+                        estimated_minutes: minutes.clamp(10, 600),
+                        priority,
+                    })
                 })
                 .collect()
         })
@@ -329,17 +412,32 @@ pub fn clean_steps(raw: &Value, today: &str, deadline: &str) -> Vec<PlanStep> {
 
 #[tauri::command]
 pub async fn ai_project_plan(app: AppHandle, lang: Option<String>, body: Value) -> Res<Value> {
-    let s = need_key(&app, &lang)?;
+    let s = app.state::<AiState>().get();
+    let provider_app = app.clone();
     let title = str_of(body.get("title"), 300).trim().to_string();
     let details = str_of(body.get("details"), 10_000);
     let subject = str_of(body.get("subject"), 60);
     let deadline = str_of(body.get("deadline"), 10);
     let today = local_date(&Local::now());
     if title.is_empty() || !is_valid_date(&deadline) {
-        return Err(err(400, tr(&lang, "Skriv hvad projektet er, og vælg en afleveringsdato.", "Describe the project and choose a due date.")));
+        return Err(err(
+            400,
+            tr(
+                &lang,
+                "Skriv hvad projektet er, og vælg en afleveringsdato.",
+                "Describe the project and choose a due date.",
+            ),
+        ));
     }
     if deadline < today {
-        return Err(err(400, tr(&lang, "Afleveringsdatoen er allerede passeret.", "The due date has already passed.")));
+        return Err(err(
+            400,
+            tr(
+                &lang,
+                "Afleveringsdatoen er allerede passeret.",
+                "The due date has already passed.",
+            ),
+        ));
     }
     let days = crate::store::days_between(&today, &deadline);
     let system = format!(
@@ -350,32 +448,60 @@ pub async fn ai_project_plan(app: AppHandle, lang: Option<String>, body: Value) 
         "Today is {today}. Final deadline: {deadline} ({days} days from now).\nSubject: {subject}\nProject: {title}\nDetails from the student: {details}"
     );
     let schema = json!({
-        "type": "OBJECT",
+        "type": "object", "additionalProperties": false,
         "properties": {
             "steps": {
-                "type": "ARRAY",
+                "type": "array",
                 "items": {
-                    "type": "OBJECT",
+                    "type": "object", "additionalProperties": false,
                     "properties": {
-                        "title": { "type": "STRING" },
-                        "deadline": { "type": "STRING" },
-                        "estimated_minutes": { "type": "INTEGER" },
-                        "priority": { "type": "STRING", "enum": ["high", "medium", "low"] }
+                        "title": { "type": "string" },
+                        "deadline": { "type": "string" },
+                        "estimated_minutes": { "type": "integer" },
+                        "priority": { "type": "string", "enum": ["high", "medium", "low"] }
                     },
                     "required": ["title", "deadline", "estimated_minutes", "priority"]
                 }
             },
-            "advice": { "type": "STRING" }
+            "advice": { "type": "string" }
         },
         "required": ["steps", "advice"]
     });
     let l = lang.clone();
-    let text = blocking(move || generate(&s, &system, vec![json!({ "role": "user", "parts": [{ "text": user }] })], Some(schema), &l)).await?;
-    let raw: Value = serde_json::from_str(text.trim_start_matches("```json").trim_matches('`').trim())
-        .map_err(|_| err(502, tr(&lang, "Gemini svarede i et uventet format. Prøv igen.", "Gemini answered in an unexpected format. Try again.")))?;
+    let text = blocking(move || {
+        generate(
+            &provider_app,
+            &s,
+            &system,
+            vec![json!({ "role": "user", "content": user })],
+            Some(schema),
+            &l,
+        )
+    })
+    .await?;
+    let raw: Value = serde_json::from_str(
+        text.trim_start_matches("```json").trim_matches('`').trim(),
+    )
+    .map_err(|_| {
+        err(
+            502,
+            tr(
+                &lang,
+                "AI svarede i et uventet format. Prøv igen.",
+                "AI answered in an unexpected format. Try again.",
+            ),
+        )
+    })?;
     let steps = clean_steps(&raw, &today, &deadline);
     if steps.is_empty() {
-        return Err(err(502, tr(&lang, "Gemini lavede ingen trin. Prøv igen med lidt flere detaljer.", "Gemini made no steps. Try again with a few more details.")));
+        return Err(err(
+            502,
+            tr(
+                &lang,
+                "AI lavede ingen trin. Prøv igen med lidt flere detaljer.",
+                "AI made no steps. Try again with a few more details.",
+            ),
+        ));
     }
     Ok(json!({ "steps": steps, "advice": raw["advice"].as_str().unwrap_or("") }))
 }
@@ -390,11 +516,22 @@ pub fn chat_context(d: &Data, subject: &str, today: &str) -> String {
         out += "(none)\n";
     }
     for t in open.iter().take(40) {
-        let overdue = if t.deadline.as_str() < today { ", OVERDUE" } else { "" };
-        out += &format!("- {} ({}) due {}{}, about {} min, priority {}\n", t.title, t.subject, t.deadline, overdue, t.estimated_minutes, t.priority);
+        let overdue = if t.deadline.as_str() < today {
+            ", OVERDUE"
+        } else {
+            ""
+        };
+        out += &format!(
+            "- {} ({}) due {}{}, about {} min, priority {}\n",
+            t.title, t.subject, t.deadline, overdue, t.estimated_minutes, t.priority
+        );
     }
     let soon = add_days(today, 7);
-    let done_soon = d.tasks.iter().filter(|t| t.status == "done" && t.deadline.as_str() >= today && t.deadline <= soon).count();
+    let done_soon = d
+        .tasks
+        .iter()
+        .filter(|t| t.status == "done" && t.deadline.as_str() >= today && t.deadline <= soon)
+        .count();
     out += &format!("({done_soon} tasks due this coming week are already done.)\n");
     if subject != "Generelt" && !subject.is_empty() {
         let notes: String = d
@@ -403,7 +540,10 @@ pub fn chat_context(d: &Data, subject: &str, today: &str) -> String {
             .filter(|n| n.subject == subject)
             .map(|n| format!("\n\n## {}\n{}", n.title, n.content))
             .collect();
-        out += &format!("\n\nThe student's own notes for {subject} (use them when relevant):{}", notes.chars().take(30_000).collect::<String>());
+        out += &format!(
+            "\n\nThe student's own notes for {subject} (use them when relevant):{}",
+            notes.chars().take(30_000).collect::<String>()
+        );
     }
     out
 }
@@ -416,7 +556,13 @@ const TUTOR: &str = "You are \"LektieHjælper\", a friendly, patient study buddy
 
 #[tauri::command]
 pub fn ai_messages(state: tauri::State<'_, AppState>) -> Res<Vec<ChatMessage>> {
-    Ok(state.store.lock().unwrap_or_else(|p| p.into_inner()).data.messages.clone())
+    Ok(state
+        .store
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .data
+        .messages
+        .clone())
 }
 
 #[tauri::command]
@@ -430,39 +576,73 @@ pub fn ai_clear_chat(state: tauri::State<'_, AppState>) -> Res<Value> {
 
 #[tauri::command]
 pub async fn ai_chat(app: AppHandle, lang: Option<String>, body: Value) -> Res<ChatMessage> {
-    let s = need_key(&app, &lang)?;
+    let s = app.state::<AiState>().get();
+    let provider_app = app.clone();
     let prompt = str_of(body.get("prompt"), 20_000).trim().to_string();
     let subject = match str_of(body.get("subject"), 60) {
         x if x.is_empty() => "Generelt".to_string(),
         x => x,
     };
     if prompt.is_empty() {
-        return Err(err(400, tr(&lang, "Skriv et spørgsmål først.", "Write a question first.")));
+        return Err(err(
+            400,
+            tr(
+                &lang,
+                "Skriv et spørgsmål først.",
+                "Write a question first.",
+            ),
+        ));
     }
+    let provider = if s.use_codex { "codex" } else { "cloudflare" };
     let (system, contents) = {
         let state = app.state::<AppState>();
         let store = state.store.lock().unwrap_or_else(|p| p.into_inner());
         let today = local_date(&Local::now());
-        let system = format!("{TUTOR}\n- {PLAIN_TEXT}\n\n{}", chat_context(&store.data, &subject, &today));
+        let system = format!(
+            "{TUTOR}\n- {PLAIN_TEXT}\n\n{}",
+            chat_context(&store.data, &subject, &today)
+        );
         let mut contents: Vec<Value> = vec![];
         let history = &store.data.messages;
-        for m in history.iter().skip(history.len().saturating_sub(20)).filter(|m| m.subject == subject) {
+        for m in history
+            .iter()
+            .skip(history.len().saturating_sub(20))
+            .filter(|m| m.subject == subject && m.provider == provider)
+        {
             if contents.is_empty() && m.role != "user" {
                 continue;
             }
-            let role = if m.role == "assistant" { "model" } else { "user" };
-            contents.push(json!({ "role": role, "parts": [{ "text": m.content }] }));
+            let role = if m.role == "assistant" {
+                "assistant"
+            } else {
+                "user"
+            };
+            contents.push(json!({ "role": role, "content": m.content }));
         }
-        contents.push(json!({ "role": "user", "parts": [{ "text": prompt }] }));
+        contents.push(json!({ "role": "user", "content": prompt }));
         (system, contents)
     };
     let l = lang.clone();
-    let answer = blocking(move || generate(&s, &system, contents, None, &l)).await?;
+    let answer = blocking(move || generate(&provider_app, &s, &system, contents, None, &l)).await?;
     let state = app.state::<AppState>();
     let mut guard = state.store.lock().unwrap_or_else(|p| p.into_inner());
     let mut store = guard.transaction();
-    store.data.messages.push(ChatMessage { id: new_id(), role: "user".into(), content: prompt, subject: subject.clone(), created_at: now_iso() });
-    let reply = ChatMessage { id: new_id(), role: "assistant".into(), content: answer, subject, created_at: now_iso() };
+    store.data.messages.push(ChatMessage {
+        provider: provider.into(),
+        id: new_id(),
+        role: "user".into(),
+        content: prompt,
+        subject: subject.clone(),
+        created_at: now_iso(),
+    });
+    let reply = ChatMessage {
+        provider: provider.into(),
+        id: new_id(),
+        role: "assistant".into(),
+        content: answer,
+        subject,
+        created_at: now_iso(),
+    };
     store.data.messages.push(reply.clone());
     let len = store.data.messages.len();
     if len > 200 {
@@ -478,40 +658,12 @@ mod tests {
     use crate::store::Task;
 
     #[test]
-    fn picks_newest_stable_flash_model() {
-        let list = json!({ "models": [
-            { "name": "models/gemini-2.0-flash", "supportedGenerationMethods": ["generateContent"] },
-            { "name": "models/gemini-2.5-flash", "supportedGenerationMethods": ["generateContent", "countTokens"] },
-            { "name": "models/gemini-2.5-flash-lite", "supportedGenerationMethods": ["generateContent"] },
-            { "name": "models/gemini-3-flash-preview", "supportedGenerationMethods": ["generateContent"] },
-            { "name": "models/gemini-2.5-pro", "supportedGenerationMethods": ["generateContent"] },
-            { "name": "models/gemini-2.5-flash-image", "supportedGenerationMethods": ["generateContent"] },
-            { "name": "models/text-embedding-004", "supportedGenerationMethods": ["embedContent"] },
-        ]});
-        let (models, best) = choose_models(&list);
-        assert_eq!(best.as_deref(), Some("gemini-2.5-flash"));
-        assert_eq!(models[0], "gemini-3-flash-preview");
-        assert!(!models.iter().any(|m| m.contains("image") || m.contains("embedding")));
-        let (_, best) = choose_models(&json!({ "models": [{ "name": "models/gemini-3.1-flash", "supportedGenerationMethods": ["generateContent"] }, { "name": "models/gemini-2.5-flash", "supportedGenerationMethods": ["generateContent"] }] }));
-        assert_eq!(best.as_deref(), Some("gemini-3.1-flash"));
-        assert_eq!(choose_models(&json!({})).1, None);
-        let pro_only = json!({ "models": [{"name": "models/gemini-3-pro", "supportedGenerationMethods": ["generateContent"]}] });
-        assert_eq!(choose_models(&pro_only).1.as_deref(), Some("gemini-3-pro"));
-    }
-
-    #[test]
-    fn reads_answers_and_explains_problems() {
-        let da = Some("da".to_string());
-        let ok = json!({ "candidates": [{ "content": { "parts": [{ "text": "tænker", "thought": true }, { "text": "Hej " }, { "text": "med dig" }] } }] });
-        assert_eq!(response_text(&ok, &da).unwrap(), "Hej med dig");
-        let blocked = json!({ "promptFeedback": { "blockReason": "SAFETY" } });
-        assert_eq!(response_text(&blocked, &da).unwrap_err().status, 422);
-        assert_eq!(response_text(&json!({ "candidates": [] }), &da).unwrap_err().status, 502);
-        assert!(gemini_error(Some(400), "API key not valid. Please pass a valid API key.", &da).detail.contains("API-nøglen virker ikke"));
-        assert_eq!(gemini_error(Some(429), "RESOURCE_EXHAUSTED", &da).status, 429);
-        assert!(gemini_error(Some(429), "", &Some("en".into())).detail.contains("quota"));
-        assert_eq!(gemini_error(None, "", &da).status, 503);
-        assert_eq!(gemini_error(Some(503), "", &da).status, 503);
+    fn cloudflare_setup_errors_distinguish_quota_and_credentials() {
+        assert_eq!(cf_error(429, &None).status, 429);
+        assert!(cf_error(403, &Some("en".into()))
+            .detail
+            .contains("permissions"));
+        assert_eq!(cf_error(0, &None).status, 503);
     }
 
     #[test]
@@ -524,7 +676,17 @@ mod tests {
             { "title": "Rettelser", "deadline": "ikke en dato" },
         ]});
         let steps = clean_steps(&raw, "2026-11-18", "2026-11-30");
-        let got: Vec<(&str, &str, i64, &str)> = steps.iter().map(|s| (s.title.as_str(), s.deadline.as_str(), s.estimated_minutes, s.priority.as_str())).collect();
+        let got: Vec<(&str, &str, i64, &str)> = steps
+            .iter()
+            .map(|s| {
+                (
+                    s.title.as_str(),
+                    s.deadline.as_str(),
+                    s.estimated_minutes,
+                    s.priority.as_str(),
+                )
+            })
+            .collect();
         assert_eq!(
             got,
             [
@@ -539,9 +701,24 @@ mod tests {
     #[test]
     fn chat_knows_deadlines_and_subject_notes() {
         let mut d = Data::default();
-        d.tasks.push(Task { title: "Essay".into(), subject: "Engelsk".into(), deadline: "2026-11-17".into(), ..Task::default() });
-        d.tasks.push(Task { title: "Færdig".into(), deadline: "2026-11-19".into(), status: "done".into(), ..Task::default() });
-        d.notes.push(crate::store::Note { title: "Fotosyntese".into(), subject: "Biologi".into(), content: "Lys + CO2".into(), ..Default::default() });
+        d.tasks.push(Task {
+            title: "Essay".into(),
+            subject: "Engelsk".into(),
+            deadline: "2026-11-17".into(),
+            ..Task::default()
+        });
+        d.tasks.push(Task {
+            title: "Færdig".into(),
+            deadline: "2026-11-19".into(),
+            status: "done".into(),
+            ..Task::default()
+        });
+        d.notes.push(crate::store::Note {
+            title: "Fotosyntese".into(),
+            subject: "Biologi".into(),
+            content: "Lys + CO2".into(),
+            ..Default::default()
+        });
         let general = chat_context(&d, "Generelt", "2026-11-18");
         assert!(general.contains("- Essay (Engelsk) due 2026-11-17, OVERDUE"));
         assert!(!general.contains("Færdig ("));
@@ -556,11 +733,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.json");
         let state = AiState::load(path.clone());
-        assert!(state.get().gemini_api_key.is_empty());
-        state.save(AiSettings { gemini_api_key: "AIza-test-key-1234567890".into(), gemini_model: "gemini-2.5-flash".into() }).unwrap();
+        state.update(|s| s.account = "a".repeat(32)).unwrap();
         let again = AiState::load(path);
-        assert_eq!(again.get().gemini_model, "gemini-2.5-flash");
-        assert_eq!(status_json(&again.get(), None)["key_hint"], "…7890");
-        assert!(note_prompt("summary", true).is_some() && note_prompt("hack", true).is_none());
+        assert_eq!(again.get().account, "a".repeat(32));
+        assert_eq!(status(&again.get())["provider"], "cloudflare");
     }
 }

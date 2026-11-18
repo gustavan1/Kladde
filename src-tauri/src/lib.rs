@@ -1,6 +1,8 @@
 //! Kladde desktop app: one window, one copy at a time, data in %APPDATA%\Kladde\kladde.json.
 
 mod ai;
+mod codex_client;
+mod claude;
 mod commands;
 mod feeds;
 mod importers;
@@ -82,6 +84,14 @@ fn create_window(app: &AppHandle) -> tauri::Result<()> {
 }
 
 pub fn run() {
+    #[cfg(target_os = "macos")]
+    {
+        let mut args = std::env::args_os().skip(1);
+        if args.next().as_deref() == Some(std::ffi::OsStr::new("--kladde-mcp")) {
+            if let Some(dir) = args.next() { claude::stdio(std::path::Path::new(&dir)); }
+            return;
+        }
+    }
     tauri::Builder::default()
         // Only one copy of Kladde: starting it again just brings the open window forward.
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
@@ -100,8 +110,8 @@ pub fn run() {
             match store::Store::open(&dir.join("kladde.json")) {
                 Ok(store) => {
                     app.manage(AppState { store: Mutex::new(store) });
-                    // The Gemini key lives in settings.json, outside kladde.json and its backups.
-                    app.manage(ai::AiState::load(dir.join("settings.json")));
+                    // Provider preferences contain no credentials.
+                    app.manage(ai::AiState::load(dir.join("providers.json")));
                     create_window(app.handle())?;
                     feeds::start_auto_sync(app.handle().clone());
                 }
@@ -143,8 +153,8 @@ pub fn run() {
             commands::delete_feed,
             ai::ai_status,
             ai::ai_save_key,
-            ai::ai_models,
-            ai::ai_set_model,
+            ai::ai_codex,
+            claude::claude_action,
             ai::ai_forget_key,
             ai::ai_note,
             ai::ai_project_plan,
