@@ -7,6 +7,7 @@ mod commands;
 mod feeds;
 mod importers;
 mod planner;
+mod school;
 mod store;
 
 use std::io::Write;
@@ -149,6 +150,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             open_url,
+            school::open_school,
             commands::dashboard,
             commands::weekly_summary_cmd,
             commands::export_backup,

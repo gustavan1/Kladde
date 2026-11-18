@@ -61,6 +61,8 @@ const routes: Route[] = [
   ["POST", /^\/calendar-feeds$/, "add_feed", withBody],
   ["POST", /^\/calendar-feeds\/([^/]+)\/sync$/, "sync_feed", withId],
   ["DELETE", /^\/calendar-feeds\/([^/]+)$/, "delete_feed", withId],
+  // School window (Ludus / Mit Niels Brock)
+  ["POST", /^\/school\/open$/, "open_school", withBody],
   // Hosted AI and Claude Desktop
   ["GET", /^\/ai\/status$/, "ai_status", noArgs],
   ["POST", /^\/ai\/key$/, "ai_save_key", withBody],

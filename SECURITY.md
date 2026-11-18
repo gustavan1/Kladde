@@ -30,6 +30,10 @@ GitHub (not as a public issue). Include what you found and how to reproduce it.
   restarting (Tauri capabilities); it has no general file, shell or network access.
 - A strict Content Security Policy: the window only loads Kladde's own files, no remote scripts.
 - Outside links open in the normal browser, never inside the app, and only `http`, `https` and `mailto` links are allowed.
+- The school window (Ludus / Mit Niels Brock) has no access to Kladde's commands or data; it can only hand over the page
+  the user is on, only on those two sites (checked against the window's real address), and the result is always shown
+  as a preview that the user must confirm. The window is private, so logins and cookies are forgotten when it closes.
+  Pages are only sent to the AI when the user presses the button.
 - Imported files and calendar data are only parsed as text (CSV, JSON, iCalendar) with size limits; nothing imported is ever run.
 - API tokens (Cloudflare) are kept in Windows Credential Manager / macOS Keychain, not in files or backups.
 - The data file is written safely (temporary file, then rename) and a damaged file is never overwritten.

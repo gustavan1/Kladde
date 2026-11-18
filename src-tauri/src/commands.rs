@@ -513,13 +513,24 @@ pub fn import_preview(state: State<'_, AppState>, lang: Option<String>, body: Va
     }
     let mut result = parse_import(&source, &content, is_da(&lang)).map_err(|m| err(400, m))?;
     // Already-imported rows are shown but not ticked.
-    let store = lock(&state);
-    let known: std::collections::HashSet<(&str, &str)> = store
-        .data
+    mark_known(&lock(&state).data, &mut result, &lang);
+    let label = match source.as_str() {
+        "lectio" => "Lectio",
+        "ludus" => "Ludus",
+        _ => "Mit Niels Brock",
+    };
+    let mut out = serde_json::to_value(&result).map_err(|e| err(500, e.to_string()))?;
+    out["source_label"] = json!(label);
+    Ok(out)
+}
+
+/// Unticks rows that were imported before (same external id and subject) and says how many.
+pub fn mark_known(data: &crate::store::Data, result: &mut crate::importers::ImportPreview, lang: &Option<String>) {
+    let known: std::collections::HashSet<(&str, &str)> = data
         .tasks
         .iter()
         .filter_map(|t| Some((t.external_id.as_deref()?, t.subject.as_str())))
-        .chain(store.data.blocks.iter().filter_map(|b| Some((b.external_id.as_deref()?, b.subject.as_str()))))
+        .chain(data.blocks.iter().filter_map(|b| Some((b.external_id.as_deref()?, b.subject.as_str()))))
         .collect();
     let mut dupes = 0;
     for item in result.items.iter_mut() {
@@ -530,19 +541,11 @@ pub fn import_preview(state: State<'_, AppState>, lang: Option<String>, body: Va
     }
     if dupes > 0 {
         result.warnings.push(tr(
-            &lang,
+            lang,
             &format!("{dupes} findes allerede og er ikke valgt."),
             &format!("{dupes} already exist and are not selected."),
         ));
     }
-    let label = match source.as_str() {
-        "lectio" => "Lectio",
-        "ludus" => "Ludus",
-        _ => "Mit Niels Brock",
-    };
-    let mut out = serde_json::to_value(&result).map_err(|e| err(500, e.to_string()))?;
-    out["source_label"] = json!(label);
-    Ok(out)
 }
 
 pub fn minutes_between(start: &str, end: &str) -> Option<i64> {

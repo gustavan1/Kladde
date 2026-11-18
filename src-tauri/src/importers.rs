@@ -110,12 +110,53 @@ fn capitalize(s: &str) -> String {
     }
 }
 
-/// "Dansk A" -> "Dansk", "2a DA" -> "Dansk", "" -> "Selvstudie".
+/// Danish upper-secondary subject names, longest first so "International økonomi" wins over "Økonomi".
+const SUBJECT_NAMES: [&str; 38] = [
+    "Kommunikation og it", "International økonomi", "Virksomhedsøkonomi", "Erhvervsøkonomi",
+    "Samtidshistorie", "Oldtidskundskab", "Naturvidenskab", "Naturgeografi", "Programmering",
+    "Erhvervsjura", "Billedkunst", "Samfundsfag", "Informatik", "Innovation", "Psykologi",
+    "Matematik", "Teknologi", "Afsætning", "Filosofi", "Geografi", "Religion", "Historie",
+    "Mediefag", "Kinesisk", "Biologi", "Engelsk", "Spansk", "Fransk", "Italiensk", "Russisk",
+    "Japansk", "Design", "Dansk", "Fysik", "Idræt", "Musik", "Kemi", "Tysk",
+];
+
+/// A known subject name inside text like "1.O Tysk fortsætter" or "Engelsk 1o", as a whole word.
+fn known_subject_name(text: &str) -> Option<&'static str> {
+    let lower = text.to_lowercase();
+    SUBJECT_NAMES.iter().copied().find(|name| {
+        let needle = name.to_lowercase();
+        lower.match_indices(&needle).any(|(i, m)| {
+            let before = lower[..i].chars().next_back();
+            let after = lower[i + m.len()..].chars().next();
+            !before.is_some_and(char::is_alphabetic) && !after.is_some_and(char::is_alphabetic)
+        })
+    })
+}
+
+static TEAM_CODE_SUFFIX: LazyLock<Regex> = LazyLock::new(|| re(r"\s+-\s+\S+$"));
+static CLASS_PREFIX: LazyLock<Regex> = LazyLock::new(|| re(r"^[0-9]+\.?[a-zA-ZæøåÆØÅ]{1,2}\s+"));
+static CLASS_OR_YEAR_SUFFIX: LazyLock<Regex> = LazyLock::new(|| re(r"\s+([0-9]+\.?[a-zA-ZæøåÆØÅ]{1,2}|[0-9]{4})$"));
+static DEPARTMENT_PREFIX: LazyLock<Regex> = LazyLock::new(|| re(r"^[A-ZÆØÅ]{2,4}\s+(\S)"));
+
+/// "Dansk A" -> "Dansk", "2a DA" -> "Dansk", "1o JTP Informatik C - j26ososh" -> "Informatik",
+/// "1.O Tysk fortsætter" -> "Tysk", "Engelsk 1o" -> "Engelsk", "" -> "Selvstudie".
 pub fn clean_subject(raw: &str) -> String {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return "Selvstudie".into();
     }
+    if let Some(name) = known_subject_name(trimmed) {
+        return name.into();
+    }
+    // School systems add team codes ("- j26ososh"), classes ("1o", "1.O"), years and
+    // department codes ("JTP") around the subject; drop those before the usual rules.
+    let mut tidy = TEAM_CODE_SUFFIX.replace(trimmed, "").to_string();
+    tidy = CLASS_PREFIX.replace(&tidy, "").to_string();
+    tidy = CLASS_OR_YEAR_SUFFIX.replace(&tidy, "").to_string();
+    if tidy.split_whitespace().count() > 1 {
+        tidy = DEPARTMENT_PREFIX.replace(&tidy, "$1").to_string();
+    }
+    let trimmed = if tidy.trim().is_empty() { trimmed } else { tidy.trim() };
     let s = LEVEL_SUFFIX.replace(trimmed, "").to_string();
     let last = s.split_whitespace().last().unwrap_or("").to_lowercase();
     if let Some(name) = abbreviation(&last) {
@@ -742,6 +783,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn school_system_subject_names_are_tidied() {
+        assert_eq!(clean_subject("1o JTP Informatik C - j26ososh"), "Informatik");
+        assert_eq!(clean_subject("1o JTP Virksomhedsøkonomi A - j26ososh"), "Virksomhedsøkonomi");
+        assert_eq!(clean_subject("1o JTP Aktivitet - j26ososh"), "Aktivitet");
+        assert_eq!(clean_subject("1o JTP Læsevejledning - j26ososh"), "Læsevejledning");
+        assert_eq!(clean_subject("1.O Tysk fortsætter"), "Tysk");
+        assert_eq!(clean_subject("Engelsk 1o"), "Engelsk");
+        assert_eq!(clean_subject("Informatik 2026"), "Informatik");
+        assert_eq!(clean_subject("International økonomi"), "International økonomi");
+        assert_eq!(clean_subject("Dansk A"), "Dansk");
+        assert_eq!(clean_subject("2a DA"), "Dansk");
+        assert_eq!(clean_subject("1x Ma"), "Matematik");
+        assert_eq!(clean_subject("Tyskland-tur"), "Tyskland-tur");
+    }
+
+    #[test]
     fn outlook_time_zones_and_odd_series_do_not_drop_lessons() {
         let ics = "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:o365\r\nSUMMARY:Dansk modul\r\nDTSTART;TZID=Romance Standard Time:20261123T081500\r\nDTEND;TZID=Romance Standard Time:20261123T094500\r\nEND:VEVENT\r\nBEGIN:VEVENT\r\nUID:unknown-zone\r\nSUMMARY:Fysik\r\nDTSTART;TZID=Somewhere/Unknown:20261124T100000\r\nEND:VEVENT\r\nBEGIN:VEVENT\r\nUID:bad\r\nSUMMARY:Mærkelig serie\r\nDTSTART:20261123T081500\r\nRRULE:FREQ=WEEKLY;BYDAY=XX\r\nEND:VEVENT\r\nBEGIN:VEVENT\r\nUID:minutely\r\nSUMMARY:Hvert minut\r\nDTSTART:20261123T081500\r\nRRULE:FREQ=MINUTELY\r\nEND:VEVENT\r\nBEGIN:VEVENT\r\nUID:ok\r\nSUMMARY:Aflevering\r\nDTSTART;VALUE=DATE:20261125\r\nEND:VEVENT\r\nBEGIN:VEVENT\r\nUID:cut\r\nSUMMARY:Afskåret";
         let today = chrono::NaiveDate::from_ymd_opt(2026, 11, 18).unwrap();
@@ -1165,7 +1222,7 @@ mod tests {
             "lectio",
             "Opgave,Hold,Frist\nA,Natur & teknik B,2026-12-01\nB,1.g Dansk A,2026-12-01\nC,2a vø,2026-12-01\nD,3b IØ,2026-12-01\nE,matematik,2026-12-01\nF,Idræt C,2026-12-01\nG,Fysik A ,2026-12-01\nH,  ,2026-12-01\nI,æstetik,2026-12-01\nJ,SAMF,2026-12-01\nK,Ma A,2026-12-01\nL,A,2026-12-01",
             true,
-            r#"{ "detected_format": "CSV", "items": [ { "kind": "deadline", "title": "A", "subject": "Natur & teknik", "subject_key": "natur_teknik", "date": "2026-12-01", "day": "Tirsdag", "time": null, "end_time": null, "notes": null, "external_id": "1a3f5dce6d636da6", "selected": true, "estimated_minutes": null }, { "kind": "deadline", "title": "B", "subject": "1.g Dansk", "subject_key": "1.g dansk", "date": "2026-12-01", "day": "Tirsdag", "time": null, "end_time": null, "notes": null, "external_id": "62533f61582ace36", "selected": true, "estimated_minutes": null }, { "kind": "deadline", "title": "C", "subject": "Virksomhedsøkonomi", "subject_key": "virksomhedsøkonomi", "date": "2026-12-01", "day": "Tirsdag", "time": null, "end_time": null, "notes": null, "external_id": "3abf515d06a14248", "selected": true, "estimated_minutes": null }, { "kind": "deadline", "title": "D", "subject": "International økonomi", "subject_key": "international økonomi", "date": "2026-12-01", "day": "Tirsdag", "time": null, "end_time": null, "notes": null, "external_id": "7262a8e9084b79d0", "selected": true, "estimated_minutes": null }, { "kind": "deadline", "title": "E", "subject": "Matematik", "subject_key": "matematik", "date": "2026-12-01", "day": "Tirsdag", "time": null, "end_time": null, "notes": null, "external_id": "fa67475884e3f4b1", "selected": true, "estimated_minutes": null }, { "kind": "deadline", "title": "F", "subject": "Idræt", "subject_key": "idræt", "date": "2026-12-01", "day": "Tirsdag", "time": null, "end_time": null, "notes": null, "external_id": "338ad90830441e98", "selected": true, "estimated_minutes": null }, { "kind": "deadline", "title": "G", "subject": "Fysik", "subject_key": "fysik", "date": "2026-12-01", "day": "Tirsdag", "time": null, "end_time": null, "notes": null, "external_id": "5ab06ace707941a4", "selected": true, "estimated_minutes": null }, { "kind": "deadline", "title": "H", "subject": "Selvstudie", "subject_key": "selvstudie", "date": "2026-12-01", "day": "Tirsdag", "time": null, "end_time": null, "notes": null, "external_id": "c1f7c4d4e74fc36c", "selected": true, "estimated_minutes": null }, { "kind": "deadline", "title": "I", "subject": "Æstetik", "subject_key": "æstetik", "date": "2026-12-01", "day": "Tirsdag", "time": null, "end_time": null, "notes": null, "external_id": "1f84df92a373f598", "selected": true, "estimated_minutes": null }, { "kind": "deadline", "title": "J", "subject": "Samfundsfag", "subject_key": "samfundsfag", "date": "2026-12-01", "day": "Tirsdag", "time": null, "end_time": null, "notes": null, "external_id": "fd67dec687fd2b4a", "selected": true, "estimated_minutes": null }, { "kind": "deadline", "title": "K", "subject": "Matematik", "subject_key": "matematik", "date": "2026-12-01", "day": "Tirsdag", "time": null, "end_time": null, "notes": null, "external_id": "5be1d63175354e2b", "selected": true, "estimated_minutes": null }, { "kind": "deadline", "title": "L", "subject": "A", "subject_key": "a", "date": "2026-12-01", "day": "Tirsdag", "time": null, "end_time": null, "notes": null, "external_id": "a94b0fd58b846989", "selected": true, "estimated_minutes": null } ], "warnings": [] }"#,
+            r#"{ "detected_format": "CSV", "items": [ { "kind": "deadline", "title": "A", "subject": "Natur & teknik", "subject_key": "natur_teknik", "date": "2026-12-01", "day": "Tirsdag", "time": null, "end_time": null, "notes": null, "external_id": "1a3f5dce6d636da6", "selected": true, "estimated_minutes": null }, { "kind": "deadline", "title": "B", "subject": "Dansk", "subject_key": "dansk", "date": "2026-12-01", "day": "Tirsdag", "time": null, "end_time": null, "notes": null, "external_id": "62533f61582ace36", "selected": true, "estimated_minutes": null }, { "kind": "deadline", "title": "C", "subject": "Virksomhedsøkonomi", "subject_key": "virksomhedsøkonomi", "date": "2026-12-01", "day": "Tirsdag", "time": null, "end_time": null, "notes": null, "external_id": "3abf515d06a14248", "selected": true, "estimated_minutes": null }, { "kind": "deadline", "title": "D", "subject": "International økonomi", "subject_key": "international økonomi", "date": "2026-12-01", "day": "Tirsdag", "time": null, "end_time": null, "notes": null, "external_id": "7262a8e9084b79d0", "selected": true, "estimated_minutes": null }, { "kind": "deadline", "title": "E", "subject": "Matematik", "subject_key": "matematik", "date": "2026-12-01", "day": "Tirsdag", "time": null, "end_time": null, "notes": null, "external_id": "fa67475884e3f4b1", "selected": true, "estimated_minutes": null }, { "kind": "deadline", "title": "F", "subject": "Idræt", "subject_key": "idræt", "date": "2026-12-01", "day": "Tirsdag", "time": null, "end_time": null, "notes": null, "external_id": "338ad90830441e98", "selected": true, "estimated_minutes": null }, { "kind": "deadline", "title": "G", "subject": "Fysik", "subject_key": "fysik", "date": "2026-12-01", "day": "Tirsdag", "time": null, "end_time": null, "notes": null, "external_id": "5ab06ace707941a4", "selected": true, "estimated_minutes": null }, { "kind": "deadline", "title": "H", "subject": "Selvstudie", "subject_key": "selvstudie", "date": "2026-12-01", "day": "Tirsdag", "time": null, "end_time": null, "notes": null, "external_id": "c1f7c4d4e74fc36c", "selected": true, "estimated_minutes": null }, { "kind": "deadline", "title": "I", "subject": "Æstetik", "subject_key": "æstetik", "date": "2026-12-01", "day": "Tirsdag", "time": null, "end_time": null, "notes": null, "external_id": "1f84df92a373f598", "selected": true, "estimated_minutes": null }, { "kind": "deadline", "title": "J", "subject": "Samfundsfag", "subject_key": "samfundsfag", "date": "2026-12-01", "day": "Tirsdag", "time": null, "end_time": null, "notes": null, "external_id": "fd67dec687fd2b4a", "selected": true, "estimated_minutes": null }, { "kind": "deadline", "title": "K", "subject": "Matematik", "subject_key": "matematik", "date": "2026-12-01", "day": "Tirsdag", "time": null, "end_time": null, "notes": null, "external_id": "5be1d63175354e2b", "selected": true, "estimated_minutes": null }, { "kind": "deadline", "title": "L", "subject": "A", "subject_key": "a", "date": "2026-12-01", "day": "Tirsdag", "time": null, "end_time": null, "notes": null, "external_id": "a94b0fd58b846989", "selected": true, "estimated_minutes": null } ], "warnings": [] }"#,
         );
     }
 
