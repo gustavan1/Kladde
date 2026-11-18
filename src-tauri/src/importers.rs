@@ -602,12 +602,31 @@ impl Property<'_> {
         let tz = if self.value.ends_with('Z') {
             rrule::Tz::UTC
         } else if let Some(id) = self.params.split(';').find_map(|p| p.strip_prefix("TZID=")) {
-            rrule::Tz::Tz(id.trim_matches('"').parse().ok()?)
+            tz_from_id(id.trim_matches('"'))
         } else {
             rrule::Tz::LOCAL
         };
         tz.from_local_datetime(&date.and_hms_opt(h, min, sec)?).earliest()
     }
+}
+
+/// IANA names ("Europe/Copenhagen") and the Windows names Outlook/Office 365 calendars use
+/// ("Romance Standard Time"). Anything unknown is read as this computer's local time, like the
+/// earlier versions did, so no lesson is dropped because of an unusual time zone name.
+fn tz_from_id(id: &str) -> rrule::Tz {
+    if let Ok(tz) = id.parse() {
+        return rrule::Tz::Tz(tz);
+    }
+    let iana = match id {
+        "Romance Standard Time" => "Europe/Copenhagen",
+        "W. Europe Standard Time" => "Europe/Berlin",
+        "Central Europe Standard Time" | "Central European Standard Time" => "Europe/Warsaw",
+        "GMT Standard Time" => "Europe/London",
+        "Greenwich Standard Time" | "UTC" | "Coordinated Universal Time" => "UTC",
+        "FLE Standard Time" => "Europe/Helsinki",
+        _ => return rrule::Tz::LOCAL,
+    };
+    iana.parse().map(rrule::Tz::Tz).unwrap_or(rrule::Tz::LOCAL)
 }
 
 fn occurrence_key(start: chrono::DateTime<rrule::Tz>, all_day: bool) -> String {
@@ -623,7 +642,8 @@ pub fn parse_ics(text: &str, today: chrono::NaiveDate) -> Result<Vec<IcsEvent>, 
     let mut overrides = HashSet::new();
     let mut instances = vec![];
     for component in unfolded.split("BEGIN:VEVENT").skip(1) {
-        let Some((body, _)) = component.split_once("END:VEVENT") else { return Err("Incomplete VEVENT".into()) };
+        // A cut-off last event is skipped; the rest of the calendar still counts.
+        let Some((body, _)) = component.split_once("END:VEVENT") else { continue };
         let mut fields = Vec::new();
         let mut nested = 0;
         for line in body.lines() {
@@ -664,33 +684,45 @@ pub fn parse_ics(text: &str, today: chrono::NaiveDate) -> Result<Vec<IcsEvent>, 
             events.push(make_event(first, recurrence));
             continue;
         }
-        let mut set = rrule::RRuleSet::new(first).rdate(first);
-        for p in fields.iter().copied() {
-            if p.name.eq_ignore_ascii_case("RRULE") {
-                let rule = p.value.parse::<rrule::RRule<rrule::Unvalidated>>().and_then(|r| r.validate(first))
-                    .map_err(|_| "Invalid RRULE")?;
-                // School timetables have at most hourly occurrences. Very fine frequencies can
-                // require scanning millions of historical instances before the visible window.
-                if matches!(rule.get_freq(), rrule::Frequency::Secondly | rrule::Frequency::Minutely) {
-                    return Err("Unsupported sub-hourly calendar series".into());
-                }
-                set = set.rrule(rule);
-            } else if p.name.eq_ignore_ascii_case("RDATE") || p.name.eq_ignore_ascii_case("EXDATE") {
-                for value in p.value.split(',') {
-                    let date = Property { value, ..p }.datetime().ok_or("Invalid recurrence date")?;
-                    set = if p.name.eq_ignore_ascii_case("RDATE") { set.rdate(date) } else { set.exdate(date) };
+        // One odd series (unknown rule, too fine-grained, too many dates) is skipped on its
+        // own instead of making the whole calendar fail.
+        let expand = || -> Result<Vec<chrono::DateTime<rrule::Tz>>, &'static str> {
+            let mut set = rrule::RRuleSet::new(first).rdate(first);
+            for p in fields.iter().copied() {
+                if p.name.eq_ignore_ascii_case("RRULE") {
+                    let rule = p.value.parse::<rrule::RRule<rrule::Unvalidated>>().and_then(|r| r.validate(first))
+                        .map_err(|_| "Invalid RRULE")?;
+                    // School timetables have at most hourly occurrences. Very fine frequencies can
+                    // require scanning millions of historical instances before the visible window.
+                    if matches!(rule.get_freq(), rrule::Frequency::Secondly | rrule::Frequency::Minutely) {
+                        return Err("Unsupported sub-hourly calendar series");
+                    }
+                    set = set.rrule(rule);
+                } else if p.name.eq_ignore_ascii_case("RDATE") || p.name.eq_ignore_ascii_case("EXDATE") {
+                    for value in p.value.split(',') {
+                        let Some(date) = Property { value, ..p }.datetime() else { continue };
+                        set = if p.name.eq_ignore_ascii_case("RDATE") { set.rdate(date) } else { set.exdate(date) };
+                    }
                 }
             }
-        }
-        let bound = |days, h| {
-            let day = today + Duration::days(days);
-            rrule::Tz::LOCAL.from_local_datetime(&day.and_hms_opt(h, 0, 0)?).earliest()
+            let bound = |days, h| {
+                let day = today + Duration::days(days);
+                rrule::Tz::LOCAL.from_local_datetime(&day.and_hms_opt(h, 0, 0)?).earliest()
+            };
+            let start_bound = bound(-2, 0).ok_or("Invalid calendar window")?;
+            let end_bound = bound(182, 0).ok_or("Invalid calendar window")?;
+            let result = set.after(start_bound).before(end_bound).all(10_000);
+            if result.limited { return Err("Calendar series exceeds expansion limit") }
+            Ok(result.dates)
         };
-        let start_bound = bound(-2, 0).ok_or("Invalid calendar window")?;
-        let end_bound = bound(182, 0).ok_or("Invalid calendar window")?;
-        let result = set.after(start_bound).before(end_bound).all(10_000);
-        if result.limited { return Err("Calendar series exceeds expansion limit".into()) }
-        for at in result.dates {
+        let dates = match expand() {
+            Ok(dates) => dates,
+            Err(reason) => {
+                crate::log(&format!("Skipped calendar series {uid:?}: {reason}"));
+                continue;
+            }
+        };
+        for at in dates {
             let key = occurrence_key(at, all_day);
             instances.push(make_event(at, Some(key)));
         }
@@ -708,6 +740,18 @@ pub fn is_deadline_event(e: &IcsEvent) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn outlook_time_zones_and_odd_series_do_not_drop_lessons() {
+        let ics = "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:o365\r\nSUMMARY:Dansk modul\r\nDTSTART;TZID=Romance Standard Time:20261123T081500\r\nDTEND;TZID=Romance Standard Time:20261123T094500\r\nEND:VEVENT\r\nBEGIN:VEVENT\r\nUID:unknown-zone\r\nSUMMARY:Fysik\r\nDTSTART;TZID=Somewhere/Unknown:20261124T100000\r\nEND:VEVENT\r\nBEGIN:VEVENT\r\nUID:bad\r\nSUMMARY:Mærkelig serie\r\nDTSTART:20261123T081500\r\nRRULE:FREQ=WEEKLY;BYDAY=XX\r\nEND:VEVENT\r\nBEGIN:VEVENT\r\nUID:minutely\r\nSUMMARY:Hvert minut\r\nDTSTART:20261123T081500\r\nRRULE:FREQ=MINUTELY\r\nEND:VEVENT\r\nBEGIN:VEVENT\r\nUID:ok\r\nSUMMARY:Aflevering\r\nDTSTART;VALUE=DATE:20261125\r\nEND:VEVENT\r\nBEGIN:VEVENT\r\nUID:cut\r\nSUMMARY:Afskåret";
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 11, 18).unwrap();
+        let events = parse_ics(ics, today).unwrap();
+        let names: Vec<&str> = events.iter().map(|e| e.summary.as_str()).collect();
+        assert_eq!(names, ["Dansk modul", "Fysik", "Aflevering"]);
+        assert_eq!(events[0].time.as_deref(), Some(copenhagen_time(8, 15).as_str()));
+        assert_eq!(events[0].end_time.as_deref(), Some(copenhagen_time(9, 45).as_str()));
+        assert_eq!(events[1].time.as_deref(), Some("10:00"), "unknown zone = local time, as before");
+    }
 
     fn copenhagen_time(hour: u32, minute: u32) -> String {
         chrono::Utc.with_ymd_and_hms(2026, 11, 23, hour - 1, minute, 0).unwrap().with_timezone(&Local).format("%H:%M").to_string()

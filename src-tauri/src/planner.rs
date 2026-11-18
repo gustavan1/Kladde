@@ -84,7 +84,15 @@ pub fn make_study_plan(data: &Data, da: bool, now: &DateTime<Local>) -> Option<S
     let mut unplanned = 0;
     let mut planned: Vec<&str> = vec![];
     for task in open {
-        let last_day = if task.deadline == today { today.clone() } else { add_days(&task.deadline, -1) };
+        // Work happens before the deadline day, or on it if that is today. Overdue work is
+        // already late, so it is caught up on any free day in the coming week.
+        let last_day = if task.deadline < today {
+            add_days(&today, WINDOW_DAYS)
+        } else if task.deadline == today {
+            today.clone()
+        } else {
+            add_days(&task.deadline, -1)
+        };
         let usable: Vec<usize> = (0..days.len()).filter(|&i| days[i].date <= last_day).collect();
         // Far-off deadlines: plan half the work this week, the rest when the plan is remade.
         let beyond_window = task.deadline > add_days(&today, WINDOW_DAYS);
@@ -238,6 +246,16 @@ mod tests {
         let d = data(vec![task("Projekt", "2026-11-30", 120, "medium", "todo")]);
         let plan = make_study_plan(&d, true, &at(2026, 11, 21, 10, 0)).unwrap();
         assert_eq!(summary(&plan), [row("Projekt", "Mandag", "15:30", 45), row("Projekt", "Tirsdag", "15:30", 15)]);
+    }
+
+    #[test]
+    fn overdue_work_is_caught_up_on_the_next_free_day() {
+        // 19:30 on Wednesday: no slots left today, so the overdue task goes to Thursday.
+        let d = data(vec![task("Gammel", "2026-11-16", 10, "high", "todo")]);
+        let plan = make_study_plan(&d, true, &at(2026, 11, 18, 19, 30)).unwrap();
+        assert_eq!(summary(&plan), [row("Gammel", "Torsdag", "15:30", 15)]);
+        let earlier = make_study_plan(&d, true, &at(2026, 11, 18, 14, 0)).unwrap();
+        assert_eq!(summary(&earlier), [row("Gammel", "Onsdag", "15:30", 15)]);
     }
 
     #[test]
