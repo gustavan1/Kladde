@@ -86,8 +86,6 @@ Kladde uses the hosted `@cf/openai/gpt-oss-20b` model. Workers Free includes 10,
 
 **What the in-app AI receives.** Note tools send the note you are working on. Project planning sends your description and deadline. Chat sends the question, recent messages for the selected subject and provider, and homework context. Selecting a subject also includes excerpts from its notes. Review proposed text and project steps before saving them.
 
-If you used an older Gemini build, its former key may still be in `settings.json` inside the Kladde data folder. The new build uses separate provider settings. You can revoke the old key in Google AI Studio.
-
 ### Updating and uninstalling
 
 - **New version:** just run the new installer. Your data is kept.

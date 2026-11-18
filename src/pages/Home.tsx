@@ -900,14 +900,31 @@ function Notes({
       (filter === "all" || n.subject_key === filter) &&
       `${n.title} ${n.content} ${n.subject}`.toLowerCase().includes(q),
   );
-  const discardDraft = () => !draft || (!draft.title && !draft.content) ||
-    window.confirm(da ? "Kassér dine ugemte ændringer?" : "Discard your unsaved edits?");
-  const newNote = () => {
-    if (!discardDraft()) return;
-    const s = subjects.find((x) => x.key === filter) ?? subjects[0];
-    setSelected(null);
-    setDraft({ title: "", content: "", subject: s?.name ?? "Dansk", subject_key: s?.key ?? "dansk" });
+  // Unsaved edits are only asked about when the draft really differs from the saved note.
+  // The question is shown inside the editor: window.confirm() is not available in every
+  // desktop web view, and there it would silently answer "no".
+  const [pendingLeave, setPendingLeave] = useState<(() => void) | null>(null);
+  const draftChanged = () => {
+    if (!draft) return false;
+    if (draft.id) {
+      const saved = data?.notes.find((n) => n.id === draft.id);
+      return !saved || saved.title !== draft.title || saved.content !== draft.content || saved.subject_key !== draft.subject_key;
+    }
+    return Boolean(draft.title.trim() || draft.content.trim());
   };
+  const leaveDraft = (action: () => void) => {
+    if (draftChanged()) setPendingLeave(() => action);
+    else {
+      setPendingLeave(null);
+      action();
+    }
+  };
+  const newNote = () =>
+    leaveDraft(() => {
+      const s = subjects.find((x) => x.key === filter) ?? subjects[0];
+      setSelected(null);
+      setDraft({ title: "", content: "", subject: s?.name ?? "Dansk", subject_key: s?.key ?? "dansk" });
+    });
   useEffect(() => {
     if (startNew) {
       newNote();
@@ -1009,11 +1026,12 @@ function Notes({
           {notes.map((note) => (
             <button
               key={note.id}
-              onClick={() => {
-                if (!discardDraft()) return;
-                setSelected(note);
-                setDraft(null);
-              }}
+              onClick={() =>
+                leaveDraft(() => {
+                  setSelected(note);
+                  setDraft(null);
+                })
+              }
               className={`w-full rounded-2xl border p-4 text-left ${selected?.id === note.id ? "border-blue-300 bg-blue-50/40" : "border-slate-200 bg-white hover:border-blue-200"}`}
               data-testid="note-card-item"
             >
@@ -1069,6 +1087,20 @@ function Notes({
                   }
                 }}
               >
+                {pendingLeave && (
+                  <ConfirmDelete
+                    text={da ? "Kassér dine ugemte ændringer?" : "Discard your unsaved edits?"}
+                    yes={da ? "Kassér" : "Discard"}
+                    no={da ? "Bliv her" : "Keep editing"}
+                    onYes={() => {
+                      const action = pendingLeave;
+                      setPendingLeave(null);
+                      action();
+                    }}
+                    onNo={() => setPendingLeave(null)}
+                    testId="note-discard-confirm"
+                  />
+                )}
                 <Input
                   autoFocus={!draft.id}
                   value={draft.title}
