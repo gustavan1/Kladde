@@ -1,0 +1,9 @@
+{
+  "bundle": {
+    "targets": ["dmg"],
+    "externalBin": ["binaries/kladde-codex"],
+    "resources": {"../third-party/": "licenses/"},
+    "icon": ["icons/icon.icns"],
+    "macOS": {"signingIdentity": "-", "minimumSystemVersion": "13.0"}
+  }
+}

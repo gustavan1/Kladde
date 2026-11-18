@@ -1,52 +1,73 @@
-name: Build Windows installer
+name: Build Kladde installers
 
-# Runs on every push to main, and can be started by hand from the Actions tab.
 on:
   push:
+    branches: [main]
+  pull_request:
     branches: [main]
   workflow_dispatch:
 
 permissions:
-  contents: write # needed to create the GitHub Release with the installer
-
-concurrency:
-  group: build-windows-${{ github.ref }}
-  cancel-in-progress: false
+  contents: read
 
 jobs:
   build:
-    runs-on: windows-latest
+    name: Build ${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: Windows x64
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            bundle: nsis
+            extension: exe
+          - platform: Apple Silicon
+            runner: macos-15
+            target: aarch64-apple-darwin
+            bundle: dmg
+            extension: dmg
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
-
       - uses: dtolnay/rust-toolchain@stable
-
+        with:
+          targets: ${{ matrix.target }}
       - uses: swatinem/rust-cache@v2
         with:
-          workspaces: "src-tauri -> target"
-
-      - name: Install frontend packages
-        run: npm ci
-
-      - name: Rust unit tests
-        run: cargo test --manifest-path src-tauri/Cargo.toml
-
-      - name: Build installer and publish it as a release
-        uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          workspaces: src-tauri -> target
+      - run: npm ci
+      - if: runner.os == 'macOS'
+        run: bash scripts/prepare-mac.sh
+      - run: cargo test --locked --manifest-path src-tauri/Cargo.toml
+      - run: npm run tauri -- build --target ${{ matrix.target }} --bundles ${{ matrix.bundle }}
+      - uses: actions/upload-artifact@v4
         with:
-          tagName: kladde-v__VERSION__-build${{ github.run_number }}
-          releaseName: "Kladde __VERSION__ (build ${{ github.run_number }})"
-          releaseBody: |
-            Windows installer for Kladde, built from commit ${{ github.sha }}.
+          name: Kladde-${{ matrix.target }}
+          path: src-tauri/target/${{ matrix.target }}/release/bundle/${{ matrix.bundle }}/*.${{ matrix.extension }}
+          if-no-files-found: error
 
-            Download **Kladde_*_x64-setup.exe** under *Assets* below and double-click it to install.
-          releaseDraft: false
-          prerelease: false
-          args: --bundles nsis
+  release:
+    needs: build
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: Kladde-*
+          merge-multiple: true
+          path: installers
+      - name: Publish both downloads
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BUILD_NUMBER: ${{ github.run_number }}
+        run: |
+          gh release create "kladde-build-$BUILD_NUMBER" installers/*.exe installers/*.dmg \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "Kladde (build $BUILD_NUMBER)" \
+            --notes "Choose the .exe for Windows x64 or the .dmg for an Apple Silicon Mac."
