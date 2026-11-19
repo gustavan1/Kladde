@@ -3,7 +3,7 @@
 use crate::commands::{err, AppState, Res};
 use crate::store::{is_valid_date, new_id, now_iso, Note, Task};
 use serde_json::{json, Value};
-use std::io::{BufRead, Write};
+use std::io::{BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Manager};
 
@@ -12,6 +12,35 @@ fn read(file: &Path) -> Result<Value> {
     let bytes = std::fs::read(file).map_err(|e| e.to_string())?;
     serde_json::from_slice(&bytes).map_err(|e| e.to_string())
 }
+const MAX_DRAFT_BYTES: u64 = 2 * 1024 * 1024;
+const MAX_DRAFTS: usize = 24;
+
+fn read_item(path: &Path) -> Result<Value> {
+    let meta = std::fs::symlink_metadata(path).map_err(|e| e.to_string())?;
+    if !meta.is_file() || meta.len() > MAX_DRAFT_BYTES { return Err("Invalid or oversized item".into()); }
+    let mut bytes = Vec::new();
+    let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    file.take(MAX_DRAFT_BYTES + 1).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+    if bytes.len() as u64 > MAX_DRAFT_BYTES { return Err("Item exceeds size limit".into()); }
+    serde_json::from_slice(&bytes).map_err(|e| e.to_string())
+}
+
+// Existing oversized inboxes can be reviewed and drained one page at a time.
+fn pending_ids(dir: &Path) -> Result<Vec<String>> {
+    let mut ids = vec![];
+    for entry in std::fs::read_dir(dir).map_err(|e| e.to_string())? {
+        let name = entry.map_err(|e| e.to_string())?.file_name();
+        if let Some(id) = name.to_str().and_then(|s| s.strip_prefix("draft-")?.strip_suffix(".json")) {
+            if uuid::Uuid::parse_str(id).is_ok_and(|v| v.to_string() == id) {
+                ids.push(id.to_owned());
+                if ids.len() >= MAX_DRAFTS { break; }
+            }
+        }
+    }
+    ids.sort_unstable();
+    Ok(ids)
+}
+
 fn write(file: &Path, value: &Value) -> Result<()> {
     let tmp = file.with_file_name(format!(".{}.tmp", new_id()));
     let result = (|| {
@@ -52,7 +81,12 @@ fn text<'a>(obj: &'a Value, key: &str, max: usize) -> Result<&'a str> {
     Ok(v)
 }
 fn submit(dir: &Path, args: &Value) -> Result<String> {
-    let share = read(&dir.join("shared.json")).map_err(|_| "Share an item in Kladde first")?;
+    // Each Claude Desktop connection runs its own process.
+    let lock = std::fs::OpenOptions::new().create(true).truncate(false).read(true).write(true)
+        .open(dir.join(".inbox.lock")).map_err(|e| e.to_string())?;
+    fs2::FileExt::lock_exclusive(&lock).map_err(|e| e.to_string())?;
+    if pending_ids(dir)?.len() >= MAX_DRAFTS { return Err("Review pending drafts in Kladde before submitting more.".into()); }
+    let share = read_item(&dir.join("shared.json")).map_err(|_| "Share an item in Kladde first")?;
     if share["shareId"] != args["shareId"] {
         return Err("The shared item changed. Read it again.".into());
     }
@@ -95,7 +129,7 @@ fn rpc(dir: &Path, msg: Value) -> Option<Value> {
         "tools/list" => tools_list(),
         "tools/call" => {
             let res = match msg["params"]["name"].as_str() {
-                Some("read_shared_item") => read(&dir.join("shared.json"))
+                Some("read_shared_item") => read_item(&dir.join("shared.json"))
                     .map(|v| v.to_string())
                     .map_err(|_| "No shared item. Select Share with Claude in Kladde.".into()),
                 Some("suggest_draft") => submit(dir, &msg["params"]["arguments"])
@@ -115,12 +149,15 @@ fn rpc(dir: &Path, msg: Value) -> Option<Value> {
 }
 pub fn stdio(dir: &Path) {
     let mut out = std::io::stdout().lock();
-    for line in std::io::stdin()
-        .lock()
-        .lines()
-        .map_while(std::result::Result::ok)
-    {
-        let reply = match serde_json::from_str(&line) {
+    let mut input = std::io::stdin().lock();
+    let mut frame = Vec::new();
+    loop {
+        frame.clear();
+        match (&mut input).take(MAX_DRAFT_BYTES + 1).read_until(b'\n', &mut frame) {
+            Ok(n) if n > 0 && n as u64 <= MAX_DRAFT_BYTES => (),
+            _ => break,
+        }
+        let reply = match serde_json::from_slice(&frame) {
             Ok(msg) => rpc(dir, msg),
             Err(_) => Some(
                 json!({"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"Invalid JSON"}}),
@@ -189,9 +226,13 @@ pub fn claude_action(app: AppHandle, body: Value) -> Res<Value> {
             write(&shared, &snapshot)?;
         }
         Some("discard") => remove(&draft_path(&dir, id)?)?,
+        Some("preview") => {
+            let draft = read_item(&draft_path(&dir, id)?)?;
+            return Ok(draft);
+        }
         Some("accept") => {
             let path = draft_path(&dir, id)?;
-            let draft = read(&path)?;
+            let draft = read_item(&path)?;
             let mut store = state.store.lock().unwrap_or_else(|p| p.into_inner());
             let mut tx = store.transaction();
             let subject = tx.data.ensure_subject(text(&draft, "subject", 60)?).0;
@@ -233,14 +274,7 @@ pub fn claude_action(app: AppHandle, body: Value) -> Res<Value> {
         Some("status") => {}
         _ => return Err(err(400, "Unknown Claude action")),
     }
-    let mut drafts = vec![];
-    for entry in std::fs::read_dir(dir).map_err(|e| err(500, e.to_string()))? {
-        let entry = entry.map_err(|e| err(500, e.to_string()))?;
-        if entry.file_name().to_string_lossy().starts_with("draft-") {
-            drafts.push(read(&entry.path())?)
-        }
-    }
-    Ok(json!({"shared":read(&shared).ok().map(|s|s["title"].clone()),"drafts":drafts}))
+    Ok(json!({"shared": read_item(&shared).ok().map(|s| s["title"].clone()), "pending": pending_ids(&dir)?}))
 }
 
 #[cfg(test)]

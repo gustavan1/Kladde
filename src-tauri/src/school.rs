@@ -11,6 +11,8 @@
 //! - The window is private (incognito): logins and cookies are forgotten when it closes.
 //! - Kladde never sees the password; it only reads the page the user chose, when they press the button.
 
+use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
 use chrono::Local;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -63,9 +65,13 @@ impl Site {
 }
 
 /// Only the automated tests point the school window at local stand-in pages.
+#[cfg(debug_assertions)]
 fn test_origin() -> Option<String> {
     std::env::var("KLADDE_SCHOOL_TEST_ORIGIN").ok().filter(|s| !s.is_empty())
 }
+
+#[cfg(not(debug_assertions))]
+fn test_origin() -> Option<String> { None }
 
 /// Which school site an address belongs to, if it is one Kladde may read.
 pub fn site_of(url: &Url) -> Option<Site> {
@@ -74,7 +80,7 @@ pub fn site_of(url: &Url) -> Option<Site> {
             return Some(if url.path().contains("ludus") { Site::Ludus } else { Site::MitNielsBrock });
         }
     }
-    if url.scheme() != "https" {
+    if url.scheme() != "https" || url.port_or_known_default() != Some(443) || !url.username().is_empty() || url.password().is_some() {
         return None;
     }
     match url.host_str()? {
@@ -84,9 +90,9 @@ pub fn site_of(url: &Url) -> Option<Site> {
     }
 }
 
-fn allowed_hosts() -> Vec<String> {
-    let mut hosts: Vec<String> = ["nielsbrock.luduseg.dk", "www.mitnielsbrock.dk", "mitnielsbrock.dk"].map(String::from).to_vec();
-    if let Some(host) = test_origin().and_then(|o| Url::parse(&o).ok()).and_then(|u| u.host_str().map(String::from)) {
+fn allowed_origins() -> Vec<String> {
+    let mut hosts: Vec<String> = ["https://nielsbrock.luduseg.dk", "https://www.mitnielsbrock.dk", "https://mitnielsbrock.dk"].map(String::from).to_vec();
+    if let Some(host) = test_origin().and_then(|o| Url::parse(&o).ok()).map(|u| u.origin().ascii_serialization()) {
         hosts.push(host);
     }
     hosts
@@ -94,7 +100,7 @@ fn allowed_hosts() -> Vec<String> {
 
 /// The floating "Hent afleveringer" button, added only on the school sites.
 fn page_script(da: bool) -> String {
-    let hosts = serde_json::to_string(&allowed_hosts()).unwrap_or_else(|_| "[]".into());
+    let hosts = serde_json::to_string(&allowed_origins()).unwrap_or_else(|_| "[]".into());
     let (button, reading, hint) = if da {
         ("Hent afleveringer fra denne side", "Læser siden…", "Kladde læser kun denne side, når du trykker.")
     } else {
@@ -102,7 +108,7 @@ fn page_script(da: bool) -> String {
     };
     format!(
         r#"(() => {{
-  if (window.top !== window || !{hosts}.includes(location.hostname)) return;
+  if (window.top !== window || !{hosts}.includes(location.origin)) return;
   const tableText = (table) => [...table.rows].map((row) =>
     [...row.cells].map((c) => (c.innerText || "").replace(/[\t\r\n]+/g, " ").trim()).join("\t")).join("\n");
   const collect = (doc, out) => {{
@@ -172,8 +178,12 @@ pub struct PagePayload {
 }
 
 pub fn decode_payload(url: &Url) -> Option<PagePayload> {
+    if url.as_str().len() > 2 * 1024 * 1024 { return None }
     let data = url.query_pairs().find(|(k, _)| k == "d")?.1.into_owned();
-    serde_json::from_str(&data).ok()
+    let page: PagePayload = serde_json::from_str(&data).ok()?;
+    (page.title.chars().count() <= 300 && page.tables.len() <= 512
+        && page.text.chars().count() <= 60_000
+        && page.tables.iter().map(|s| s.chars().count()).sum::<usize>() <= 150_000).then_some(page)
 }
 
 /// Deadlines found in clear tables (columns like Opgave / Fag / Frist). No AI involved.
@@ -296,6 +306,14 @@ fn handle_page(app: AppHandle, page_url: Option<Url>, payload: Option<PagePayloa
                 "There is no clear table of assignments on this page. Switch on AI under AI helper so Kladde can read pages like this – or open the page with deadlines.",
             ));
         }
+        let confirmed = app.dialog().message(tr(&lang,
+            "Send denne sides titel, tabeller og tekst til din valgte AI-udbyder?",
+            "Send this page's title, tables and text to your selected AI provider?"))
+            .title(site.label()).buttons(MessageDialogButtons::OkCancel).blocking_show();
+        if !confirmed {
+            status(&tr(&lang, "Annulleret", "Cancelled"));
+            return;
+        }
         status(&tr(&lang, "AI læser siden…", "AI is reading the page…"));
         match ai_extract(&app, site, &page, &today, &lang) {
             Ok(found) => items = found,
@@ -330,9 +348,10 @@ fn handle_page(app: AppHandle, page_url: Option<Url>, payload: Option<PagePayloa
     });
 }
 
-/// Opens (or brings forward) the school window on Ludus or Mit Niels Brock.
+/// WebView2 needs the UI thread to process messages while a new window is created.
+/// Keep this command asynchronous, including the first click before the user signs in.
 #[tauri::command]
-pub fn open_school(app: AppHandle, lang: Option<String>, body: Value) -> Res<Value> {
+pub async fn open_school(app: AppHandle, lang: Option<String>, body: Value) -> Res<Value> {
     let Some(site) = Site::from_name(&str_of(body.get("site"), 20)) else {
         return Err(err(400, "Unknown school site"));
     };
@@ -346,6 +365,7 @@ pub fn open_school(app: AppHandle, lang: Option<String>, body: Value) -> Res<Val
     let nav_app = app.clone();
     let popup_app = app.clone();
     let nav_lang = lang.clone();
+    let processing = Arc::new(AtomicBool::new(false));
     WebviewWindowBuilder::new(&app, LABEL, WebviewUrl::External(url))
         .title(format!("Kladde · {}", site.label()))
         .inner_size(1180.0, 820.0)
@@ -354,15 +374,25 @@ pub fn open_school(app: AppHandle, lang: Option<String>, body: Value) -> Res<Val
         .initialization_script(page_script(is_da(&lang)))
         .on_navigation(move |url| {
             if url.host_str() == Some(EXTRACT_HOST) {
+                if url.scheme() != "https" || url.as_str().len() > 2 * 1024 * 1024 { return false }
+                let page_url = nav_app.get_webview_window(LABEL).and_then(|w| w.url().ok());
+                if page_url.as_ref().and_then(site_of).is_none() || processing.swap(true, Ordering::AcqRel) {
+                    return false;
+                }
                 let app = nav_app.clone();
-                let page_url = app.get_webview_window(LABEL).and_then(|w| w.url().ok());
-                let payload = decode_payload(url);
                 let lang = nav_lang.clone();
-                std::thread::spawn(move || handle_page(app, page_url, payload, lang));
+                let busy = processing.clone();
+                let handoff = url.clone();
+                if std::thread::Builder::new().spawn(move || {
+                    handle_page(app, page_url, decode_payload(&handoff), lang);
+                    busy.store(false, Ordering::Release);
+                }).is_err() {
+                    processing.store(false, Ordering::Release);
+                }
                 return false;
             }
             // Logging in may pass through other sign-in sites; anything but web pages is refused.
-            matches!(url.scheme(), "https" | "http")
+            matches!(url.scheme(), "https" | "http") && (site_of(url).is_some() || !crate::is_internal(url))
         })
         .on_new_window(move |url, _features| {
             if site_of(&url).is_some() {

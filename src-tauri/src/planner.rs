@@ -33,16 +33,20 @@ struct PlanDay {
 }
 
 fn minute_of_day(time: &str) -> Option<i64> {
-    let (h, m) = time.split_once(':')?;
-    Some(h.parse::<i64>().ok()? * 60 + m.parse::<i64>().ok()?)
+    use chrono::Timelike;
+    let time = chrono::NaiveTime::parse_from_str(time, "%H:%M").ok()?;
+    Some(i64::from(time.hour() * 60 + time.minute()))
 }
 
 impl PlanDay {
-    fn free_slot(&self, duration: i64) -> Option<usize> {
-        self.slots.iter().position(|time| {
-            let start = minute_of_day(time).expect("fixed planner slot");
-            self.busy.iter().all(|&(a, b)| start + duration <= a || start >= b)
-        })
+    fn free_slot(&self, desired: i64) -> Option<(usize, i64)> {
+        self.slots.iter().enumerate().filter_map(|(index, time)| {
+            let start = minute_of_day(time)?;
+            if self.busy.iter().any(|&(a, b)| a <= start && start < b) { return None }
+            let available = self.busy.iter().filter(|&&(a, _)| a > start)
+                .map(|&(a, _)| a - start).min().unwrap_or(desired);
+            Some((index, desired.min(available)))
+        }).max_by_key(|&(index, length)| (length, std::cmp::Reverse(index)))
     }
 }
 
@@ -96,16 +100,15 @@ pub fn make_study_plan(data: &Data, da: bool, now: &DateTime<Local>) -> Option<S
         let usable: Vec<usize> = (0..days.len()).filter(|&i| days[i].date <= last_day).collect();
         // Far-off deadlines: plan half the work this week, the rest when the plan is remade.
         let beyond_window = task.deadline > add_days(&today, WINDOW_DAYS);
-        let estimate = if beyond_window { (task.estimated_minutes + 1) / 2 } else { task.estimated_minutes };
+        let estimate = task.estimated_minutes.clamp(5, 1440);
+        let estimate = if beyond_window { (estimate + 1) / 2 } else { estimate };
         let mut remaining = estimate.max(15);
         while remaining > 0 {
-            let minutes = MAX_BLOCK.min(remaining);
-            let best = usable
-                .iter()
-                .copied()
-                .filter_map(|i| days[i].free_slot(minutes).map(|slot| (i, slot)))
-                .min_by(|&(a, _), &(b, _)| days[a].minutes.cmp(&days[b].minutes).then(days[a].date.cmp(&days[b].date)));
-            let Some((i, slot)) = best else {
+            let desired = MAX_BLOCK.min(remaining);
+            let best = usable.iter().filter_map(|&i| {
+                days[i].free_slot(desired).map(|(slot, length)| (i, slot, length))
+            }).min_by_key(|&(i, _, length)| (std::cmp::Reverse(length), days[i].minutes, i));
+            let Some((i, slot, minutes)) = best else {
                 unplanned += remaining;
                 break;
             };
@@ -119,6 +122,7 @@ pub fn make_study_plan(data: &Data, da: bool, now: &DateTime<Local>) -> Option<S
             blocks.push(Block {
                 id: new_id(),
                 day: day_name(&day.date).unwrap_or("Mandag").to_string(),
+                scheduled_on: Some(day.date.clone()),
                 time: time.to_string(),
                 label: task.title.clone(),
                 subject: task.subject.clone(),
@@ -126,6 +130,7 @@ pub fn make_study_plan(data: &Data, da: bool, now: &DateTime<Local>) -> Option<S
                 source: Some("plan".into()),
                 minutes: Some(minutes),
                 external_id: Some(task.id.clone()),
+                extra: Default::default(),
             });
         }
     }
@@ -166,6 +171,7 @@ pub fn weekly_summary(data: &Data, now: &DateTime<Local>) -> WeeklySummary {
     let today = local_date(now);
     let dow = now.weekday().num_days_from_sunday() as i64;
     let week_start = add_days(&today, if dow == 0 { -6 } else { 1 - dow });
+    let week_end = add_days(&week_start, 6);
     let week_start_iso = local_midnight_iso(&week_start);
     let completed: Vec<&Task> = data
         .tasks
@@ -178,16 +184,17 @@ pub fn weekly_summary(data: &Data, now: &DateTime<Local>) -> WeeklySummary {
         open.iter().filter(|t| t.deadline >= today && t.deadline <= in_a_week).map(|t| (*t).clone()).collect();
     upcoming.sort_by(|a, b| a.deadline.cmp(&b.deadline));
     WeeklySummary {
-        week_start,
+        week_start: week_start.clone(),
         is_sunday: dow == 0,
         completed_tasks: completed.len(),
-        study_minutes: completed.iter().map(|t| t.estimated_minutes).sum(),
+        study_minutes: completed.iter().map(|t| t.estimated_minutes.clamp(5, 1440)).sum(),
         notes_touched: data.notes.iter().filter(|n| n.updated_at >= week_start_iso).count(),
         planned_focus_minutes: data
             .blocks
             .iter()
-            .filter(|b| b.source.as_deref() == Some("plan"))
-            .map(|b| b.minutes.unwrap_or(0))
+            .filter(|b| b.source.as_deref() == Some("plan")
+                && b.scheduled_on.as_ref().is_some_and(|d| d >= &week_start && d <= &week_end))
+            .map(|b| b.minutes.unwrap_or(0).clamp(0, MAX_BLOCK))
             .sum(),
         overdue_tasks: open.iter().filter(|t| t.deadline < today).count(),
         upcoming,
@@ -323,8 +330,8 @@ mod tests {
             Note { title: "Gammel".into(), updated_at: local_iso(2026, 11, 14, 8), ..Note::default() },
         ];
         d.blocks = vec![
-            Block { source: Some("plan".into()), minutes: Some(45), ..Block::default() },
-            Block { source: Some("plan".into()), minutes: Some(30), ..Block::default() },
+            Block { source: Some("plan".into()), scheduled_on: Some("2026-11-18".into()), minutes: Some(45), ..Block::default() },
+            Block { source: Some("plan".into()), scheduled_on: Some("2026-11-18".into()), minutes: Some(30), ..Block::default() },
             Block { source: Some("import".into()), minutes: Some(90), ..Block::default() },
         ];
         let w = weekly_summary(&d, &at(2026, 11, 18, 14, 0));

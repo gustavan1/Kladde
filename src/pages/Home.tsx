@@ -36,6 +36,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
+import { formatStudyDate } from "@/lib/dates";
 import { ApiError, apiDelete, apiGet, apiPatch, apiPost, errorDetail, exportBackup } from "@/lib/api";
 
 type Language = "da" | "en";
@@ -57,6 +58,7 @@ type Task = {
   subject: string;
   subject_key: string;
   deadline: string;
+  deadline_time?: string | null;
   status: "todo" | "doing" | "done";
   priority: "high" | "medium" | "low";
   estimated_minutes: number;
@@ -86,6 +88,7 @@ type NoteDraft = { id?: string; title: string; content: string; subject: string;
 type TaskDraft = NoteDraft & {
   id?: string;
   deadline: string;
+  deadline_time?: string | null;
   priority: Task["priority"];
   estimated_minutes: number;
 };
@@ -181,10 +184,7 @@ const toneFor = (key: string) => {
 };
 const subjectKey = (name: string) => name.toLowerCase().replaceAll(" & ", "_");
 
-const dateLabel = (value: string, lang: Language) =>
-  new Intl.DateTimeFormat(lang === "da" ? "da-DK" : "en-GB", { day: "numeric", month: "short" }).format(
-    new Date(`${value}T12:00:00`),
-  );
+const dateLabel = formatStudyDate;
 const ageLabel = (value: string, lang: Language) => {
   const minutes = Math.max(0, Math.round((Date.now() - new Date(value).getTime()) / 60000));
   if (minutes < 60)
@@ -370,7 +370,7 @@ function Sidebar({
             {nextTask.title}
           </p>
           <p className="mt-1 text-xs text-slate-500">
-            {nextTask.subject} · {dateLabel(nextTask.deadline, lang)}
+            {nextTask.subject} · {dateLabel(nextTask.deadline, lang, nextTask.deadline_time)}
           </p>
           <button
             onClick={() => setActive("homework")}
@@ -513,7 +513,7 @@ function Header({
                       <span>
                         <span className="block text-sm font-semibold text-slate-800">{task.title}</span>
                         <span className="text-xs text-slate-400">
-                          {task.subject} · {dateLabel(task.deadline, lang)}
+                          {task.subject} · {dateLabel(task.deadline, lang, task.deadline_time)}
                         </span>
                       </span>
                     </button>
@@ -747,7 +747,7 @@ function Overview({
                   <div className="min-w-0 flex-1">
                     <p className="truncate text-sm font-semibold text-slate-800">{task.title}</p>
                     <p className={`mt-1 text-xs ${overdue ? "text-red-500" : "text-slate-400"}`}>
-                      {task.subject} · {dateLabel(task.deadline, lang)}
+                      {task.subject} · {dateLabel(task.deadline, lang, task.deadline_time)}
                       {overdue ? (lang === "da" ? " · overskredet" : " · overdue") : ""}
                     </p>
                   </div>
@@ -831,7 +831,7 @@ function Notes({
   data,
   lang,
   search,
-  selected,
+  selected: chosenNote,
   setSelected,
   draft,
   setDraft,
@@ -854,8 +854,10 @@ function Notes({
 }) {
   const t = text[lang];
   const da = lang === "da";
-  const [filter, setFilter] = useState("all");
-  const [newSubject, setNewSubject] = useState<string | null>(null);
+  const [filter, setFilter] = useState("");
+  type SubjectForm = { name: string; original?: Subject; inEditor?: boolean };
+  const [subjectForm, setSubjectForm] = useState<SubjectForm | null>(null);
+  const cache = useQueryClient();
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const subjects = data?.subjects || [];
   const save = useMutation({
@@ -863,6 +865,7 @@ function Notes({
       payload.id ? apiPatch<Note>(`/notes/${payload.id}`, payload) : apiPost<Note>("/notes", payload),
     onSuccess: (note, savedDraft) => {
       setSelected(note);
+      setFilter(current => current ? note.subject_key : current);
       setDraft((current) => current === savedDraft ? null : current);
       refresh();
       toast.success(da ? "Note gemt" : "Note saved");
@@ -886,22 +889,49 @@ function Notes({
       toast.success(da ? "Note slettet" : "Note deleted");
     },
   });
-  const addSubject = useMutation({
-    mutationFn: (name: string) => apiPost<Subject>("/subjects", { name }),
-    onSuccess: (s) => {
-      setNewSubject(null);
-      setFilter(s.key);
+  const saveSubject = useMutation({
+    mutationFn: (form: SubjectForm) => form.original
+      ? apiPatch<Subject>(`/subjects/${form.original.id}`, { name: form.name })
+      : apiPost<Subject>("/subjects", { name: form.name }),
+    onSuccess: (subject, form) => {
+      cache.setQueryData<Dashboard>(["dashboard"], current => current && ({
+        ...current, subjects: current.subjects.some(s => s.id === subject.id)
+          ? current.subjects.map(s => s.id === subject.id ? subject : s) : [...current.subjects, subject],
+      }));
+      if (form.inEditor || form.original) {
+        setDraft(current => current && (form.inEditor || current.subject_key === form.original?.key)
+          ? { ...current, subject: subject.name, subject_key: subject.key } : current);
+      }
+      setSubjectForm(null);
+      setFilter(subject.key);
       refresh();
+      void cache.invalidateQueries({ queryKey: ["ai-messages"] });
     },
-    onError: (e) =>
-      toast.error(errorDetail(e, da ? "Faget kunne ikke tilføjes" : "Subject could not be added")),
+    onError: e => toast.error(errorDetail(e, da ? "Faget kunne ikke gemmes." : "Could not save the subject.")),
   });
+  const subjectEditor = subjectForm && (
+    <form className="space-y-2" onSubmit={e => {
+      e.preventDefault();
+      if (subjectForm.name.trim() && !saveSubject.isPending) saveSubject.mutate(subjectForm);
+    }}>
+      <Input autoFocus value={subjectForm.name} aria-label={da ? "Fagets navn" : "Subject name"}
+        placeholder={da ? "Fx Fysik" : "E.g. Physics"} data-testid="subject-add-input"
+        onChange={e => setSubjectForm({ ...subjectForm, name: e.target.value })} />
+      <div className="flex gap-1">
+        <Button size="sm" type="submit" disabled={!subjectForm.name.trim() || saveSubject.isPending}>
+          {subjectForm.original ? t.save : da ? "Tilføj" : "Add"}
+        </Button>
+        <Button size="sm" type="button" variant="ghost" disabled={saveSubject.isPending} onClick={() => setSubjectForm(null)}>{t.cancel}</Button>
+      </div>
+    </form>
+  );
   const q = search.toLowerCase();
   const notes = (data?.notes || []).filter(
     (n) =>
-      (filter === "all" || n.subject_key === filter) &&
+      (!filter || n.subject_key === filter) &&
       `${n.title} ${n.content} ${n.subject}`.toLowerCase().includes(q),
   );
+  const selected = chosenNote && (!filter || chosenNote.subject_key === filter) ? chosenNote : notes[0] ?? null;
   // Unsaved edits are only asked about when the draft really differs from the saved note.
   // The question is shown inside the editor: window.confirm() is not available in every
   // desktop web view, and there it would silently answer "no".
@@ -962,65 +992,34 @@ function Notes({
             <CardTitle className="font-heading text-sm">{da ? "Fag" : "Subjects"}</CardTitle>
           </CardHeader>
           <CardContent className="space-y-1 px-3 pb-4">
-            {[{ key: "all", name: da ? "Alle noter" : "All notes" }, ...subjects].map((s) => (
+            {[{ key: "", name: da ? "Alle noter" : "All notes" }, ...subjects].map((s) => (
               <button
                 key={s.key}
                 onClick={() => setFilter(s.key)}
                 className={`flex w-full justify-between rounded-lg px-3 py-2 text-left text-xs font-medium ${filter === s.key ? "bg-blue-50 text-blue-700" : "text-slate-500 hover:bg-slate-50"}`}
-                data-testid={s.key === "all" ? "subject-folder-all" : "subject-folder-item"}
+                data-testid={!s.key ? "subject-folder-all" : "subject-folder-item"}
               >
                 {s.name}
                 <span className="text-slate-400">
-                  {s.key === "all"
+                  {!s.key
                     ? (data?.notes || []).length
                     : data?.notes.filter((n) => n.subject_key === s.key).length}
                 </span>
               </button>
             ))}
-            {newSubject === null ? (
-              <button
-                onClick={() => setNewSubject("")}
-                className="mt-2 flex w-full items-center gap-1.5 rounded-lg px-3 py-2 text-left text-xs font-semibold text-blue-600 hover:bg-blue-50"
-                data-testid="subject-add-button"
-              >
-                <Plus className="size-3.5" /> {da ? "Nyt fag" : "New subject"}
-              </button>
-            ) : (
-              <form
-                className="mt-2 space-y-2 px-1"
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  if (newSubject.trim()) addSubject.mutate(newSubject.trim());
-                }}
-              >
-                <Input
-                  autoFocus
-                  value={newSubject}
-                  onChange={(e) => setNewSubject(e.target.value)}
-                  onKeyDown={(e) => e.key === "Escape" && setNewSubject(null)}
-                  placeholder={da ? "Fx Fysik" : "E.g. Physics"}
-                  className="h-8 rounded-lg text-xs"
-                  data-testid="subject-add-input"
-                />
-                <div className="flex gap-1">
-                  <Button
-                    type="submit"
-                    size="sm"
-                    className="h-7 flex-1 bg-blue-600 text-xs hover:bg-blue-700"
-                  >
-                    {da ? "Tilføj" : "Add"}
-                  </Button>
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant="ghost"
-                    className="h-7 text-xs"
-                    onClick={() => setNewSubject(null)}
-                  >
-                    <X className="size-3.5" />
-                  </Button>
-                </div>
-              </form>
+            {subjectForm && !subjectForm.inEditor ? subjectEditor : (
+              <>
+                <button onClick={() => setSubjectForm({ name: "" })}
+                  className="flex gap-1 px-3 py-2 text-xs font-semibold text-blue-600" data-testid="subject-add-button">
+                  <Plus className="size-3.5" /> {da ? "Nyt fag" : "New subject"}
+                </button>
+                {filter && <button onClick={() => {
+                  const original = subjects.find(s => s.key === filter);
+                  if (original) setSubjectForm({ name: original.name, original });
+                }} className="flex gap-1 px-3 py-2 text-xs font-semibold text-blue-600" data-testid="subject-rename-button">
+                  <Pencil className="size-3.5" /> {da ? "Omdøb fag" : "Rename subject"}
+                </button>}
+              </>
             )}
           </CardContent>
         </Card>
@@ -1055,7 +1054,7 @@ function Notes({
             >
               {search
                 ? t.noNotes
-                : filter !== "all"
+                : filter
                   ? da
                     ? `Ingen noter i ${subjects.find((s) => s.key === filter)?.name ?? "faget"} endnu.`
                     : `No notes in ${subjects.find((s) => s.key === filter)?.name ?? "this subject"} yet.`
@@ -1118,6 +1117,12 @@ function Notes({
                   className="h-10 w-full rounded-xl border border-slate-200 bg-white px-3 text-sm"
                   testId="note-editor-subject-select"
                 />
+                {subjectForm?.inEditor ? subjectEditor : (
+                  <button type="button" className="text-xs font-semibold text-blue-700"
+                    onClick={() => setSubjectForm({ name: "", inEditor: true })} data-testid="note-new-subject">
+                    {da ? "Opret fag til denne note" : "Create subject for this note"}
+                  </button>
+                )}
                 <Textarea
                   value={draft.content}
                   onChange={(e) => setDraft({ ...draft, content: e.target.value })}
@@ -1382,6 +1387,7 @@ function Homework({
       subject: task.subject,
       subject_key: task.subject_key,
       deadline: task.deadline,
+      deadline_time: task.deadline_time,
       priority: task.priority,
       estimated_minutes: task.estimated_minutes,
     });
@@ -1475,6 +1481,11 @@ function Homework({
                     className="h-10 rounded-xl text-slate-900"
                     data-testid="task-deadline-input"
                   />
+                </label>
+                <label className="space-y-1 text-xs font-medium text-slate-500">
+                  {da ? "Klokkeslæt (valgfrit)" : "Due time (optional)"}
+                  <Input type="time" value={draft.deadline_time ?? ""}
+                    onChange={e => setDraft({ ...draft, deadline_time: e.target.value || null })} />
                 </label>
                 <label className="space-y-1 text-xs font-medium text-slate-500">
                   {da ? "Prioritet" : "Priority"}
@@ -1588,7 +1599,7 @@ function Homework({
                     <span
                       className={`flex items-center gap-1 ${overdue ? "font-semibold text-red-500" : ""}`}
                     >
-                      <CalendarDays className="size-3.5" /> {dateLabel(task.deadline, lang)}
+                      <CalendarDays className="size-3.5" /> {dateLabel(task.deadline, lang, task.deadline_time)}
                       {overdue
                         ? da
                           ? " · overskredet"
@@ -1666,17 +1677,8 @@ function Homework({
   );
 }
 
-/** A page from the school window, read by Kladde and waiting for the user to confirm. */
-export type SchoolImport = { seq: number; preview: ImportPreview };
-
-function ImportCenter({
-  lang,
-  refresh,
-  incoming,
-}: {
-  lang: Language;
-  refresh: () => void;
-  incoming: SchoolImport | null;
+function ImportCenter({ lang, refresh, navigate }: {
+  lang: Language; refresh: () => void; navigate: (view: View) => void;
 }) {
   const da = lang === "da";
   const [source, setSource] = useState<ImportSource>("lectio");
@@ -1711,19 +1713,23 @@ function ImportCenter({
     mutationFn: (site: "ludus" | "mitnielsbrock") => apiPost("/school/open", { site }),
     onError: (e) => toast.error(errorDetail(e, da ? "Skolevinduet kunne ikke åbnes" : "The school window could not open")),
   });
-  // Each page read in the school window adds to the same list (already listed rows are skipped).
   useEffect(() => {
-    if (!incoming) return;
-    const { preview: p } = incoming;
-    setSource(p.source);
-    setItems((current) => [
-      ...current,
-      ...p.items.filter(
-        (n) => !current.some((c) => c.external_id === n.external_id && c.subject === n.subject),
-      ),
-    ]);
-    setMeta({ format: p.detected_format, warnings: p.warnings });
-  }, [incoming]);
+    const unlisten = [
+      listen<ImportPreview>("school-import", ({ payload }) => {
+        setSource(payload.source);
+        setItems(current => {
+          const known = new Set(current.map(i => JSON.stringify([i.external_id, i.subject])));
+          return [...current, ...payload.items.filter(i => !known.has(JSON.stringify([i.external_id, i.subject])))];
+        });
+        setMeta({ format: payload.detected_format, warnings: payload.warnings });
+        if (payload.items.length) toast.success(`${payload.items.length} · ${payload.source_label}`, {
+          action: { label: da ? "Gennemse" : "Review", onClick: () => navigate("imports") },
+        });
+      }),
+      listen<{ detail: string }>("school-import-error", event => toast.error(event.payload.detail)),
+    ];
+    return () => unlisten.forEach(p => void p.then(stop => stop()).catch(() => {}));
+  }, [da, navigate]);
   const examples: Record<ImportSource, string> = {
     lectio:
       "Opgave,Fag,Afleveringsfrist\nDansk aflevering,Dansk,2026-09-14\nMatematik aflevering,Matematik,2026-09-18",
@@ -1734,7 +1740,22 @@ function ImportCenter({
   };
   const sourceName =
     source === "lectio" ? "Lectio" : source === "ludus" ? "Ludus · Niels Brock" : "Mit Niels Brock";
-  const loadFile = async (file: File) => setContent(await file.text());
+  const tooLarge = () => toast.error(da ? "Maks. 500.000 tegn." : "Limit: 500,000 characters.");
+  const acceptText = (value: string) => {
+    if (value.length > 1_000_000 || Array.from(value).length > 500_000) { tooLarge(); return; }
+    setContent(value);
+  };
+  const loadFile = async (file: File) => {
+    if (file.size > 2_000_003) { tooLarge(); return; }
+    try {
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      const encoding = bytes[0] === 0xff && bytes[1] === 0xfe ? "utf-16le"
+        : bytes[0] === 0xfe && bytes[1] === 0xff ? "utf-16be" : "utf-8";
+      acceptText(new TextDecoder(encoding, { fatal: true }).decode(bytes));
+    } catch {
+      toast.error(da ? "Kunne ikke læse tekstfilen. Gem den som UTF-8, og prøv igen." : "Could not read the text file. Save it as UTF-8 and try again.");
+    }
+  };
   const selectedCount = items.filter((item) => item.selected).length;
   const format = meta ? meta.format : preview.data?.detected_format;
   const warnings = meta ? meta.warnings : (preview.data?.warnings ?? []);
@@ -1808,11 +1829,16 @@ function ImportCenter({
               </li>
             ))}
           </ol>
+          <p className="text-xs text-slate-600">
+            {da ? "Hvis skolevinduet ikke indlæses, kan du kopiere tabellen fra " : "If the school window does not load, copy the table from "}
+            <a className="underline" href="https://www.mitnielsbrock.dk/login/index.php" target="_blank" rel="noreferrer">Mit Niels Brock</a>
+            {da ? " og indsætte den under Andre måder." : " and paste it under Other ways."}
+          </p>
           <p className="flex items-start gap-2 text-xs leading-relaxed text-slate-400">
             <CheckCircle2 className="mt-0.5 size-4 shrink-0 text-emerald-500" />
             {da
-              ? "Skolevinduet glemmer dit login, når du lukker det. Står der ingen liste, så tryk “Hent afleveringer fra denne side” – så læser AI'en siden (kun når du trykker)."
-              : "The school window forgets your login when you close it. If a page has no list, press “Get assignments from this page” – the AI then reads the page (only when you press)."}
+              ? "Skolevinduet glemmer dit login, når du lukker det. Står der ingen liste, så tryk “Hent afleveringer fra denne side” – bekræft derefter, om siden må sendes til din AI-udbyder."
+              : "The school window forgets your login when you close it. If a page has no list, press “Get assignments from this page” – then confirm whether to send the page to your AI provider."}
           </p>
         </CardContent>
       </Card>
@@ -1995,7 +2021,7 @@ function ImportCenter({
           <CardContent className="space-y-4">
             <Textarea
               value={content}
-              onChange={(e) => setContent(e.target.value)}
+              onChange={(e) => acceptText(e.target.value)}
               placeholder={
                 da
                   ? "Indsæt CSV, JSON eller en kopieret tabel her…"
@@ -2326,20 +2352,6 @@ export default function Home() {
   const [draft, setDraft] = useState<NoteDraft | null>(null);
   const [startNewNote, setStartNewNote] = useState(false);
   const qc = useQueryClient();
-  const [schoolImport, setSchoolImport] = useState<SchoolImport | null>(null);
-  // Pages read in the school window arrive here and open in the import list.
-  useEffect(() => {
-    const unlisten = [
-      listen<ImportPreview>("school-import", (event) => {
-        setSchoolImport((prev) => ({ seq: (prev?.seq ?? 0) + 1, preview: event.payload }));
-        setActiveState("imports");
-        const n = event.payload.items.length;
-        if (n) toast.success(lang === "da" ? `${n} fra ${event.payload.source_label} – tjek og gem` : `${n} from ${event.payload.source_label} – review and save`);
-      }),
-      listen<{ detail: string }>("school-import-error", (event) => toast.error(event.payload.detail)),
-    ];
-    return () => unlisten.forEach((p) => void p.then((stop) => stop()));
-  }, [lang]);
   const setLang = (v: Language) => {
     setLangState(v);
     writeStorage("kladde-language", v);
@@ -2479,9 +2491,10 @@ export default function Home() {
             <Planner data={data} lang={lang} refresh={refresh} />
           ) : active === "ai" ? (
             <AiView lang={lang} subjects={data?.subjects || []} />
-          ) : (
-            <ImportCenter lang={lang} refresh={refresh} incoming={schoolImport} />
-          )}
+          ) : null}
+          <div hidden={active !== "imports" || dashboard.isPending}>
+            <ImportCenter lang={lang} refresh={refresh} navigate={setActiveState} />
+          </div>
         </main>
         <footer
           className="flex flex-wrap items-center justify-center gap-x-4 gap-y-1 border-t border-slate-200/70 px-6 py-4 text-[11px] text-slate-400"

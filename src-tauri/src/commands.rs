@@ -12,11 +12,13 @@ use crate::feeds;
 use crate::importers::{clean_subject, js_round, parse_import};
 use crate::planner::{make_study_plan, weekly_summary, StudyPlan, WeeklySummary};
 use crate::store::{
-    add_days, day_name, local_date, new_id, now_iso, to_pretty_json, Block, CalendarFeed, Note, Store, Subject, Task, Transaction,
+    add_days, day_name, local_date, new_id, now_iso, write_snapshot, Block, CalendarFeed, Note, Store, Subject, Task, Transaction,
 };
 
 pub struct AppState {
     pub store: Mutex<Store>,
+    pub chat_generation: std::sync::atomic::AtomicU64,
+    pub refreshing: Mutex<std::collections::HashSet<String>>,
 }
 
 #[derive(Serialize, Debug)]
@@ -97,13 +99,14 @@ pub fn js_number(v: Option<&Value>) -> f64 {
 
 pub fn is_date(v: &str) -> bool {
     let b = v.as_bytes();
-    b.len() == 10
+    crate::store::is_valid_date(v) && b.len() == 10
         && b.iter().enumerate().all(|(i, c)| if i == 4 || i == 7 { *c == b'-' } else { c.is_ascii_digit() })
 }
 
 fn is_hhmm(v: &str) -> bool {
     let b = v.as_bytes();
     b.len() == 5 && b[2] == b':' && [0, 1, 3, 4].iter().all(|&i| b[i].is_ascii_digit())
+        && chrono::NaiveTime::parse_from_str(v, "%H:%M").is_ok()
 }
 
 fn lock<'a>(state: &'a State<'_, AppState>) -> std::sync::MutexGuard<'a, Store> {
@@ -148,7 +151,10 @@ pub fn dashboard(state: State<'_, AppState>) -> Res<Dashboard> {
     let tasks = sorted_tasks(&d.tasks);
     let reminders =
         tasks.iter().filter(|t| t.status != "done" && t.deadline >= today && t.deadline <= tomorrow).cloned().collect();
-    Ok(Dashboard { today, notes, tasks, subjects: d.subjects.clone(), study_blocks: d.blocks.clone(), reminders })
+    let last = add_days(&today, 6);
+    let study_blocks = d.blocks.iter().filter(|b| b.source.as_deref() != Some("plan")
+        || b.scheduled_on.as_ref().is_some_and(|date| date >= &today && date <= &last)).cloned().collect();
+    Ok(Dashboard { today, notes, tasks, subjects: d.subjects.clone(), study_blocks, reminders })
 }
 
 #[tauri::command]
@@ -173,10 +179,19 @@ pub async fn export_backup(app: AppHandle, state: State<'_, AppState>, lang: Opt
     }
     let Some(chosen) = dialog.blocking_save_file() else { return Ok(None) };
     let path = chosen.into_path().map_err(|e| err(500, e.to_string()))?;
-    let json = to_pretty_json(&lock(&state).data)?;
-    std::fs::write(&path, json).map_err(|e| {
-        err(500, format!("{} {}: {e}", tr(&lang, "Kunne ikke gemme", "Could not save"), path.display()))
-    })?;
+    let snapshot = {
+        let store = lock(&state);
+        if path.try_exists().map_err(|e| err(500, e.to_string()))?
+            && same_file::is_same_file(&path, store.path()).map_err(|e| err(500, e.to_string()))? {
+            return Err(err(400, tr(&lang, "Vælg en anden fil end den aktive datafil.", "Choose a destination other than the active data file.")));
+        }
+        let mut copy = store.data.clone();
+        for feed in &mut copy.feeds {
+            feed.url.clear();
+        }
+        copy
+    };
+    write_snapshot(&path, &snapshot)?;
     Ok(Some(path.display().to_string()))
 }
 
@@ -184,15 +199,55 @@ pub async fn export_backup(app: AppHandle, state: State<'_, AppState>, lang: Opt
 
 #[tauri::command]
 pub fn create_subject(state: State<'_, AppState>, lang: Option<String>, body: Value) -> Res<Subject> {
-    let name = str_of(field(&body, "name"), 60).trim().to_string();
-    if name.is_empty() {
-        return Err(err(400, tr(&lang, "Faget skal have et navn.", "The subject needs a name.")));
-    }
+    let name = subject_name(&body, &lang)?;
     let mut guard = lock(&state);
     let mut store = guard.transaction();
-    let (subject, _) = store.data.ensure_subject(&name);
+    let (subject, _) = store.data.ensure_subject(name);
     store.commit()?;
     Ok(subject)
+}
+
+fn subject_name<'a>(body: &'a Value, lang: &Option<String>) -> Res<&'a str> {
+    let name = body["name"].as_str().unwrap_or("").trim();
+    if name.is_empty() || name.chars().count() > 60 {
+        return Err(err(400, tr(lang, "Brug 1–60 tegn til fagets navn.", "Use 1–60 characters for the subject name.")));
+    }
+    Ok(name)
+}
+
+#[tauri::command]
+pub fn rename_subject(state: State<'_, AppState>, lang: Option<String>, id: String, body: Value) -> Res<Subject> {
+    let name = subject_name(&body, &lang)?;
+    let mut guard = lock(&state);
+    let mut tx = guard.transaction();
+    let subject = rename_in_data(&mut tx.data, &id, name, &lang)?;
+    tx.commit()?;
+    Ok(subject)
+}
+
+fn rename_in_data(data: &mut crate::store::Data, id: &str, name: &str, lang: &Option<String>) -> Res<Subject> {
+    let key = crate::store::subject_key(name);
+    if data.subjects.iter().any(|s| s.id != id && s.key == key) {
+        return Err(err(409, tr(lang, "Der findes allerede et fag med det navn.", "A subject with that name already exists.")));
+    }
+    let subject = data.subjects.iter_mut().find(|s| s.id == id).ok_or_else(|| not_found(lang))?;
+    let old_name = std::mem::replace(&mut subject.name, name.to_owned());
+    let old_key = std::mem::replace(&mut subject.key, key);
+    for note in &mut data.notes {
+        if note.subject_key == old_key || note.subject == old_name {
+            note.subject.clone_from(&subject.name);
+            note.subject_key.clone_from(&subject.key);
+        }
+    }
+    for task in &mut data.tasks {
+        if task.subject_key == old_key || task.subject == old_name {
+            task.subject.clone_from(&subject.name);
+            task.subject_key.clone_from(&subject.key);
+        }
+    }
+    for block in data.blocks.iter_mut().filter(|b| b.subject == old_name) { block.subject.clone_from(&subject.name); }
+    for msg in data.messages.iter_mut().filter(|m| m.subject == old_name) { msg.subject.clone_from(&subject.name); }
+    Ok(subject.clone())
 }
 
 // ---------- Notes ----------
@@ -253,11 +308,12 @@ pub fn create_note(state: State<'_, AppState>, lang: Option<String>, body: Value
         id: new_id(),
         title: tr(&lang, "Uden titel", "Untitled"),
         content: String::new(),
-        subject: "Dansk".into(),
-        subject_key: "dansk".into(),
+        subject: store.data.subjects.first().map(|s| s.name.clone()).unwrap_or_default(),
+        subject_key: store.data.subjects.first().map(|s| s.key.clone()).unwrap_or_default(),
         is_pinned: false,
         created_at: now.clone(),
         updated_at: now,
+        ..Default::default()
     };
     let f = note_fields(&mut store, &lang, &body)?;
     apply_note(&mut note, f);
@@ -305,21 +361,26 @@ pub fn delete_note(state: State<'_, AppState>, lang: Option<String>, id: String)
 struct TaskFields {
     title: Option<String>,
     deadline: Option<String>,
+    deadline_time: Option<Option<String>>,
     priority: Option<String>,
     estimated_minutes: Option<i64>,
     subject: Option<Subject>,
     status: Option<String>,
 }
 
-fn task_fields(store: &mut Transaction<'_>, b: &Value) -> TaskFields {
+fn task_fields(store: &mut Transaction<'_>, b: &Value, lang: &Option<String>) -> Res<TaskFields> {
     let mut out = TaskFields::default();
     if has(b, "title") {
         out.title = Some(str_of(field(b, "title"), 300).trim().to_string());
     }
-    if let Some(Value::String(d)) = field(b, "deadline") {
-        if is_date(d) {
-            out.deadline = Some(d.clone());
-        }
+    if let Some(v) = field(b, "deadline") {
+        let date = v.as_str().filter(|d| is_date(d)).ok_or_else(|| err(400, tr(lang, "Ugyldig dato.", "Invalid deadline.")))?;
+        out.deadline = Some(date.to_owned());
+    }
+    if let Some(v) = field(b, "deadline_time") {
+        out.deadline_time = Some(if v.is_null() || v.as_str() == Some("") { None } else {
+            Some(v.as_str().filter(|t| is_hhmm(t)).ok_or_else(|| err(400, tr(lang, "Ugyldigt tidspunkt.", "Invalid due time.")))?.to_owned())
+        });
     }
     if let Some(Value::String(p)) = field(b, "priority") {
         if ["high", "medium", "low"].contains(&p.as_str()) {
@@ -339,7 +400,7 @@ fn task_fields(store: &mut Transaction<'_>, b: &Value) -> TaskFields {
             out.status = Some(s.clone());
         }
     }
-    out
+    Ok(out)
 }
 
 fn apply_task(task: &mut Task, f: TaskFields) {
@@ -349,6 +410,7 @@ fn apply_task(task: &mut Task, f: TaskFields) {
     if let Some(d) = f.deadline {
         task.deadline = d;
     }
+    if let Some(time) = f.deadline_time { task.deadline_time = time; }
     if let Some(p) = f.priority {
         task.priority = p;
     }
@@ -368,20 +430,40 @@ fn apply_task(task: &mut Task, f: TaskFields) {
 pub fn create_task(state: State<'_, AppState>, lang: Option<String>, body: Value) -> Res<Task> {
     let mut guard = lock(&state);
     let mut store = guard.transaction();
-    let f = task_fields(&mut store, &body);
-    if f.title.as_deref().unwrap_or("").is_empty() {
-        return Err(err(400, tr(&lang, "Opgaven skal have en titel.", "The task needs a title.")));
-    }
-    let mut task = Task {
-        id: new_id(),
-        deadline: local_date(&Local::now()),
-        created_at: now_iso(),
-        ..Task::default()
-    };
-    apply_task(&mut task, f);
-    store.data.tasks.push(task.clone());
+    let task = stage_task(&mut store, &body, &lang, new_id())?;
     store.commit()?;
     Ok(task)
+}
+
+fn stage_task(store: &mut Transaction<'_>, body: &Value, lang: &Option<String>, id: String) -> Res<Task> {
+    let f = task_fields(store, body, lang)?;
+    if f.title.as_deref().unwrap_or("").is_empty() {
+        return Err(err(400, tr(lang, "Opgaven skal have en titel.", "The task needs a title.")));
+    }
+    let mut task = Task {
+        id, deadline: local_date(&Local::now()), created_at: now_iso(), ..Task::default()
+    };
+    if let Some(subject) = store.data.subjects.first() {
+        task.subject.clone_from(&subject.name);
+        task.subject_key.clone_from(&subject.key);
+    }
+    apply_task(&mut task, f);
+    if task.status == "done" { task.completed_at = Some(now_iso()); }
+    store.data.tasks.push(task.clone());
+    Ok(task)
+}
+
+#[tauri::command]
+pub fn create_project_tasks(state: State<'_, AppState>, lang: Option<String>, body: Value) -> Res<()> {
+    let items = body["items"].as_array().filter(|a| (1..=12).contains(&a.len())).ok_or_else(|| err(400, "Expected 1–12 project steps"))?;
+    let mut guard = lock(&state);
+    let mut tx = guard.transaction();
+    for item in items {
+        let id = item["id"].as_str().and_then(|s| uuid::Uuid::parse_str(s).ok()).ok_or_else(|| err(400, "Invalid project step ID"))?.to_string();
+        if !tx.data.tasks.iter().any(|t| t.id == id) { stage_task(&mut tx, item, &lang, id)?; }
+    }
+    tx.commit()?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -391,7 +473,7 @@ pub fn update_task(state: State<'_, AppState>, lang: Option<String>, id: String,
     if !store.data.tasks.iter().any(|t| t.id == id) {
         return Err(not_found(&lang));
     }
-    let mut f = task_fields(&mut store, &body);
+    let mut f = task_fields(&mut store, &body, &lang)?;
     if f.title.as_deref() == Some("") {
         f.title = None;
     }
@@ -403,6 +485,9 @@ pub fn update_task(state: State<'_, AppState>, lang: Option<String>, id: String,
     }
     apply_task(task, f);
     let task = task.clone();
+    if task.status == "done" {
+        store.data.blocks.retain(|b| !(b.source.as_deref() == Some("plan") && b.external_id.as_deref() == Some(id.as_str())));
+    }
     store.commit()?;
     Ok(task)
 }
@@ -428,7 +513,7 @@ pub fn create_block(state: State<'_, AppState>, lang: Option<String>, body: Valu
     let b = &body;
     let label = str_of(field(b, "label"), 200).trim().to_string();
     let day = str_of(field(b, "day"), 20);
-    let time = str_of(field(b, "time"), 5);
+    let time = field(b, "time").and_then(Value::as_str).unwrap_or("").to_owned();
     let days = ["Mandag", "Tirsdag", "Onsdag", "Torsdag", "Fredag", "Lørdag", "Søndag"];
     if label.is_empty() || !days.contains(&day.as_str()) || !is_hhmm(&time) {
         return Err(err(400, tr(&lang, "Udfyld titel, dag og tidspunkt.", "Fill in title, day and time.")));
@@ -451,6 +536,7 @@ pub fn create_block(state: State<'_, AppState>, lang: Option<String>, body: Valu
         source: Some("manual".into()),
         minutes: (minutes > 0.0).then(|| js_round(minutes).min(600)),
         external_id: None,
+        ..Default::default()
     };
     store.data.blocks.push(block.clone());
     store.commit()?;
@@ -558,10 +644,21 @@ pub fn minutes_between(start: &str, end: &str) -> Option<i64> {
 
 #[tauri::command]
 pub fn import_commit(state: State<'_, AppState>, lang: Option<String>, body: Value) -> Res<Value> {
-    let items: Vec<Value> = field(&body, "items").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    let items = body["items"].as_array().filter(|a| a.len() <= crate::importers::MAX_IMPORT_ROWS)
+        .ok_or_else(|| err(400, tr(&lang, "For mange eller ugyldige rækker.", "Too many or invalid import rows.")))?;
+    for item in items.iter().filter(|i| truthy(i.get("selected"))) {
+        for (key, valid) in [("date", is_date as fn(&str) -> bool), ("time", is_hhmm), ("end_time", is_hhmm)] {
+            if let Some(value) = item.get(key).filter(|v| !v.is_null() && v.as_str() != Some("")) {
+                if !value.as_str().is_some_and(valid) { return Err(err(400, format!("Invalid {key}"))); }
+            }
+        }
+        if let Some(day) = item["day"].as_str().filter(|s| !s.is_empty()) {
+            if !crate::store::DAY_NAMES.contains(&day) { return Err(err(400, "Invalid weekday")); }
+        }
+    }
     let mut guard = lock(&state);
     let mut store = guard.transaction();
-    let result = import_items(&mut store.data, &items, &lang);
+    let result = import_items(&mut store.data, items, &lang);
     store.commit()?;
     Ok(result)
 }
@@ -583,27 +680,29 @@ fn import_items(data: &mut crate::store::Data, items: &[Value], lang: &Option<St
         let date = str_of(field(item, "date"), 20);
         if kind == "deadline" {
             let deadline = if is_date(&date) { date } else { today.clone() };
+            let deadline_time = item["time"].as_str().filter(|t| is_hhmm(t)).map(str::to_owned);
             if data.tasks.iter().any(|t| {
                 t.subject_key == subject.key && ((ext.is_some() && t.external_id == ext)
-                    || (t.title == title && t.deadline == deadline))
+                    || (t.title == title && t.deadline == deadline && t.deadline_time == deadline_time))
             }) {
                 skipped += 1;
                 continue;
             }
             let est = js_number(field(item, "estimated_minutes"));
-            let past = deadline < today;
             data.tasks.push(Task {
                 id: new_id(),
                 title,
                 subject: subject.name,
                 subject_key: subject.key,
-                status: if past { "done" } else { "todo" }.into(),
+                status: "todo".into(),
                 priority: if deadline <= add_days(&today, 3) { "high" } else { "medium" }.into(),
-                estimated_minutes: if est > 0.0 { js_round(est) } else { 60 },
+                estimated_minutes: if est.is_finite() && est > 0.0 { js_round(est).clamp(5, 1440) } else { 60 },
                 created_at: now_iso(),
-                completed_at: past.then(now_iso),
+                completed_at: None,
+                deadline_time,
                 external_id: ext,
                 deadline,
+                ..Default::default()
             });
             tasks += 1;
         } else if kind == "lesson" {
@@ -634,6 +733,7 @@ fn import_items(data: &mut crate::store::Data, items: &[Value], lang: &Option<St
                 source: Some("import".into()),
                 minutes,
                 external_id: ext,
+                ..Default::default()
             });
             blocks += 1;
         }
@@ -669,14 +769,13 @@ pub fn list_feeds(state: State<'_, AppState>) -> Res<Vec<Value>> {
 
 #[tauri::command]
 pub async fn add_feed(app: AppHandle, lang: Option<String>, body: Value) -> Res<Value> {
-    let url = feeds::normalize_url(str_of(field(&body, "url"), 2000).trim());
-    if url::Url::parse(&url).is_err() {
-        return Err(err(400, tr(&lang, "Det ligner ikke et gyldigt link.", "That does not look like a valid link.")));
-    }
+    let url = feeds::normalize_url(body["url"].as_str().unwrap_or("")).map_err(|e| err(400, e))?;
+    let reconnect = body["reconnect_id"].as_str().map(str::to_owned);
     let da = is_da(&lang);
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
-        let fetched = feeds::fetch_calendar(&url, da);
+        let now = Local::now();
+        let events = feeds::calendar_events(feeds::fetch_calendar(&url, da), da, &now);
         let mut guard = state.store.lock().unwrap_or_else(|p| p.into_inner());
         let mut store = guard.transaction();
         if store.data.feeds.iter().any(|f| f.url == url) {
@@ -686,20 +785,20 @@ pub async fn add_feed(app: AppHandle, lang: Option<String>, body: Value) -> Res<
             "" => tr(&lang, "Skolekalender", "School calendar"),
             l => l.to_string(),
         };
-        let feed = CalendarFeed {
-            id: new_id(),
-            label,
-            url,
-            created_at: now_iso(),
-            last_synced_at: None,
-            last_status: "pending".into(),
-            last_error: None,
-            imported_tasks: 0,
-            imported_blocks: 0,
+        let id = if let Some(id) = reconnect {
+            let feed = store.data.feeds.iter_mut().find(|f| f.id == id && f.url.is_empty())
+                .ok_or_else(|| err(409, "This subscription is no longer awaiting reconnection."))?;
+            if let Err(reason) = &events { return Err(err(400, reason.clone())); }
+            feed.url = url;
+            id
+        } else {
+            let id = new_id();
+            store.data.feeds.push(CalendarFeed {
+                id: id.clone(), label, url, created_at: now_iso(), last_status: "pending".into(), ..Default::default()
+            });
+            id
         };
-        let id = feed.id.clone();
-        store.data.feeds.push(feed);
-        let result = feeds::apply_sync(&mut store.data, &id, fetched, da, &Local::now()).expect("newly added feed");
+        let result = feeds::apply_events(&mut store.data, &id, events, &now).expect("existing feed");
         store.commit()?;
         Ok(result)
     }).await.map_err(|e| err(500, e.to_string()))?

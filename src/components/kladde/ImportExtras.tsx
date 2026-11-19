@@ -22,6 +22,7 @@ export interface CalendarFeed {
   id: string;
   label: string;
   url_preview: string;
+  needs_url: boolean;
   created_at: string;
   last_synced_at: string | null;
   last_status: string;
@@ -42,6 +43,7 @@ export function CalendarLinks({ lang, refresh }: { lang: Language; refresh: () =
   const qc = useQueryClient();
   const [url, setUrl] = useState("");
   const [label, setLabel] = useState("");
+  const [reconnect, setReconnect] = useState<CalendarFeed | null>(null);
   const feeds = useQuery({
     queryKey: ["calendar-feeds"],
     queryFn: () => apiGet<CalendarFeed[]>("/calendar-feeds"),
@@ -65,11 +67,13 @@ export function CalendarLinks({ lang, refresh }: { lang: Language; refresh: () =
     mutationFn: () =>
       apiPost<CalendarSyncResult>("/calendar-feeds", {
         url,
+        reconnect_id: reconnect?.id,
         label: label || (da ? "Skolekalender" : "School calendar"),
       }),
     onSuccess: (r) => {
       setUrl("");
       setLabel("");
+      setReconnect(null);
       done(r);
     },
     onError: (e) => toast.error(errorText(e, da ? "Linket kunne ikke tilføjes" : "Link could not be added")),
@@ -118,6 +122,7 @@ export function CalendarLinks({ lang, refresh }: { lang: Language; refresh: () =
             data-testid="calendar-url-input"
           />
           <Input
+            disabled={Boolean(reconnect)}
             value={label}
             onChange={(e) => setLabel(e.target.value)}
             placeholder={da ? "Navn, fx Lectio" : "Name, e.g. Lectio"}
@@ -130,9 +135,11 @@ export function CalendarLinks({ lang, refresh }: { lang: Language; refresh: () =
             className="h-10 bg-blue-600 hover:bg-blue-700"
             data-testid="calendar-add-button"
           >
-            {add.isPending ? (da ? "Henter…" : "Fetching…") : da ? "Tilføj" : "Add"}
+            {add.isPending ? (da ? "Henter…" : "Fetching…") : reconnect ? (da ? "Tilslut igen" : "Reconnect") : da ? "Tilføj" : "Add"}
           </Button>
         </div>
+        {reconnect && <button type="button" onClick={() => { setReconnect(null); setUrl(""); setLabel(""); }}
+          className="text-xs underline">{da ? "Annuller gentilslutning" : "Cancel reconnection"}</button>}
         <div className="space-y-2" data-testid="calendar-feed-list">
           {(feeds.data || []).map((feed) => (
             <div
@@ -160,12 +167,15 @@ export function CalendarLinks({ lang, refresh }: { lang: Language; refresh: () =
               <Button
                 variant="outline"
                 size="sm"
-                onClick={() => sync.mutate(feed.id)}
+                onClick={() => {
+                  if (feed.needs_url) { setReconnect(feed); setUrl(""); setLabel(feed.label); }
+                  else sync.mutate(feed.id);
+                }}
                 disabled={sync.isPending}
                 data-testid="calendar-sync-button"
               >
                 <RefreshCw className={`size-3.5 ${sync.isPending ? "animate-spin" : ""}`} />{" "}
-                {da ? "Opdatér nu" : "Sync now"}
+                {feed.needs_url ? (da ? "Tilslut link igen" : "Reconnect link") : da ? "Opdatér nu" : "Sync now"}
               </Button>
               <Button
                 variant="ghost"

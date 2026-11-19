@@ -275,7 +275,7 @@ export function AiSetup({ lang }: { lang: Language }) {
 type Item = { id: string; title: string; subject: string };
 type Inbox = {
   shared: string | null;
-  drafts: (Item & { kind: string; content?: string; deadline?: string })[];
+  pending: string[];
 };
 
 export function ClaudePanel({ lang }: { lang: Language }) {
@@ -293,6 +293,17 @@ export function ClaudePanel({ lang }: { lang: Language }) {
     queryFn: () => apiPost<Inbox>("/claude", { action: "status" }),
     enabled: open,
     refetchInterval: open ? 5000 : false,
+  });
+  const [position, setPosition] = useState(0);
+  const ids = inbox.data?.pending ?? [];
+  const index = Math.max(0, Math.min(position, ids.length - 1));
+  const draftId = ids[index];
+  const preview = useQuery({
+    queryKey: ["claude-draft", draftId],
+    queryFn: () => apiPost<Item & { kind: string; content?: string; deadline?: string }>("/claude", { action: "preview", id: draftId }),
+    enabled: open && Boolean(draftId),
+    staleTime: Infinity,
+    retry: false,
   });
   const update = useMutation({
     mutationFn: (args: { action: string; id?: string; kind?: string }) =>
@@ -405,42 +416,29 @@ export function ClaudePanel({ lang }: { lang: Language }) {
           </Button>
         </p>
       )}
-      {inbox.data?.drafts.map((d) => (
-        <article className="space-y-2 rounded border p-3" key={d.id}>
-          <h3 className="font-semibold">{d.title}</h3>
-          <p>
-            {d.subject} ·{" "}
-            {d.kind === "note"
-              ? da
-                ? "Note"
-                : "Note"
-              : da
-                ? "Lektie"
-                : "Homework"}{" "}
-            {d.deadline}
-          </p>
-          {d.content && (
-            <p className="max-h-60 overflow-auto whitespace-pre-wrap">
-              {d.content}
-            </p>
-          )}
+      {draftId && (
+        <article className="space-y-2 rounded border p-3">
+          <div className="flex items-center gap-2">
+            <Button variant="outline" size="sm" disabled={index === 0} onClick={() => setPosition(index - 1)}>←</Button>
+            <span>{da ? "Udkast" : "Draft"} {index + 1} / {ids.length}</span>
+            <Button variant="outline" size="sm" disabled={index + 1 >= ids.length} onClick={() => setPosition(index + 1)}>→</Button>
+          </div>
+          {preview.data && <>
+            <h3 className="font-semibold">{preview.data.title}</h3>
+            <p>{preview.data.subject} · {preview.data.kind === "note" ? "Note" : da ? "Lektie" : "Homework"} {preview.data.deadline}</p>
+            {preview.data.content && <p className="max-h-60 overflow-auto whitespace-pre-wrap">{preview.data.content}</p>}
+          </>}
+          {preview.isError && <p role="alert">{da ? "Udkastet kunne ikke læses." : "Could not read this draft."}</p>}
           <div className="flex gap-2">
-            <Button
-              disabled={update.isPending}
-              onClick={() => update.mutate({ action: "accept", id: d.id })}
-            >
+            <Button disabled={update.isPending || !preview.data} onClick={() => update.mutate({ action: "accept", id: draftId })}>
               {da ? "Gem som ny" : "Save as new"}
             </Button>
-            <Button
-              variant="outline"
-              disabled={update.isPending}
-              onClick={() => update.mutate({ action: "discard", id: d.id })}
-            >
+            <Button variant="outline" disabled={update.isPending} onClick={() => update.mutate({ action: "discard", id: draftId })}>
               {da ? "Kassér" : "Discard"}
             </Button>
           </div>
         </article>
-      ))}
+      )}
       {(update.isError || inbox.isError) && (
         <p role="alert" className="text-red-700">
           {errorDetail(

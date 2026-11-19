@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { CalendarDays, CheckCircle2, CircleAlert, FileText, Timer } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
+import { formatStudyDate } from "@/lib/dates";
 import { apiGet } from "@/lib/api";
 
 type Language = "da" | "en";
@@ -12,6 +13,7 @@ interface Task {
   subject: string;
   subject_key: string;
   deadline: string;
+  deadline_time?: string | null;
   status: "todo" | "doing" | "done";
   priority: "high" | "medium" | "low";
   estimated_minutes: number;
@@ -27,12 +29,7 @@ export interface WeeklySummary {
   overdue_tasks: number;
   upcoming: Task[];
 }
-const short = (value: string, lang: Language) =>
-  new Intl.DateTimeFormat(lang === "da" ? "da-DK" : "en-GB", {
-    weekday: "short",
-    day: "numeric",
-    month: "short",
-  }).format(new Date(`${value}T12:00:00`));
+const short = (value: string, lang: Language, time?: string | null) => formatStudyDate(value, lang, time, true);
 const hours = (minutes: number, da: boolean) =>
   (minutes >= 60
     ? `${Math.floor(minutes / 60)} t ${minutes % 60 ? `${minutes % 60} min` : ""}`.trim()
@@ -141,7 +138,7 @@ export function WeeklyCard({ lang }: { lang: Language }) {
                     {t.title} <span className="text-slate-400">· {t.subject}</span>
                   </span>
                   <span className="shrink-0 text-xs font-medium text-slate-500">
-                    {short(t.deadline, lang)}
+                    {short(t.deadline, lang, t.deadline_time)}
                   </span>
                 </li>
               ))}
