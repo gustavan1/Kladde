@@ -67,7 +67,13 @@ impl Site {
 /// Only the automated tests point the school window at local stand-in pages.
 #[cfg(debug_assertions)]
 fn test_origin() -> Option<String> {
-    std::env::var("KLADDE_SCHOOL_TEST_ORIGIN").ok().filter(|s| !s.is_empty())
+    let origin = Url::parse(&std::env::var("KLADDE_SCHOOL_TEST_ORIGIN").ok()?).ok()?;
+    let local = match origin.host()? {
+        url::Host::Ipv4(ip) => ip.is_loopback(),
+        url::Host::Ipv6(ip) => ip.is_loopback(),
+        url::Host::Domain(s) => s == "localhost",
+    };
+    (local && matches!(origin.scheme(), "http" | "https")).then(|| origin.origin().ascii_serialization())
 }
 
 #[cfg(not(debug_assertions))]
@@ -99,7 +105,7 @@ fn allowed_origins() -> Vec<String> {
 }
 
 /// The floating "Hent afleveringer" button, added only on the school sites.
-fn page_script(da: bool) -> String {
+fn page_script(da: bool, handoff_path: &str) -> String {
     let hosts = serde_json::to_string(&allowed_origins()).unwrap_or_else(|_| "[]".into());
     let (button, reading, hint) = if da {
         ("Hent afleveringer fra denne side", "Læser siden…", "Kladde læser kun denne side, når du trykker.")
@@ -129,7 +135,7 @@ fn page_script(da: bool) -> String {
     collect(document, out);
     const payload = {{ auto, title: document.title.slice(0, 300), tables: out.tables.join("\u0001").slice(0, 150000).split("\u0001"),
       text: auto ? "" : out.text.join("\n\n").slice(0, 60000) }};
-    location.href = "https://{EXTRACT_HOST}/?d=" + encodeURIComponent(JSON.stringify(payload));
+    location.href = "https://{EXTRACT_HOST}{handoff_path}?d=" + encodeURIComponent(JSON.stringify(payload));
   }};
   const autoCheck = () => {{
     const out = {{ tables: [], text: [] }};
@@ -362,19 +368,29 @@ pub async fn open_school(app: AppHandle, lang: Option<String>, body: Value) -> R
         let _ = w.set_focus();
         return Ok(json!({ "opened": site.source() }));
     }
+    // Older WebView2 falls back to a non-private controller. The frontend targets
+    // Chromium 110, which also includes the controller options needed for InPrivate.
+    #[cfg(windows)]
+    if tauri::webview_version().ok().and_then(|v| v.split('.').next()?.parse::<u32>().ok()).unwrap_or(0) < 110 {
+        return Err(err(400, tr(&lang, "Opdatér Microsoft Edge WebView2 for at åbne det private skolevindue.",
+            "Update Microsoft Edge WebView2 to open the private school window.")));
+    }
     let nav_app = app.clone();
     let popup_app = app.clone();
     let nav_lang = lang.clone();
     let processing = Arc::new(AtomicBool::new(false));
+    // The nonce lives in the trusted top frame's collector. A cross-origin
+    // subframe cannot hand off its own content under the parent page's address.
+    let handoff_path = format!("/{}", crate::store::new_id());
     WebviewWindowBuilder::new(&app, LABEL, WebviewUrl::External(url))
         .title(format!("Kladde · {}", site.label()))
         .inner_size(1180.0, 820.0)
         .min_inner_size(640.0, 480.0)
         .incognito(true)
-        .initialization_script(page_script(is_da(&lang)))
+        .initialization_script(page_script(is_da(&lang), &handoff_path))
         .on_navigation(move |url| {
             if url.host_str() == Some(EXTRACT_HOST) {
-                if url.scheme() != "https" || url.as_str().len() > 2 * 1024 * 1024 { return false }
+                if url.scheme() != "https" || url.path() != handoff_path || url.as_str().len() > 2 * 1024 * 1024 { return false }
                 let page_url = nav_app.get_webview_window(LABEL).and_then(|w| w.url().ok());
                 if page_url.as_ref().and_then(site_of).is_none() || processing.swap(true, Ordering::AcqRel) {
                     return false;
@@ -487,10 +503,19 @@ mod tests {
 
     #[test]
     fn button_script_only_runs_on_school_sites() {
-        let script = page_script(true);
+        let script = page_script(true, "/test-handoff");
         assert!(script.contains("nielsbrock.luduseg.dk") && script.contains("www.mitnielsbrock.dk"));
         assert!(script.contains("window.top !== window"));
-        assert!(script.contains("https://kladde-extract.invalid/?d="));
+        assert!(script.contains("https://kladde-extract.invalid/test-handoff?d="));
         assert!(script.contains("Hent afleveringer fra denne side"));
     }
+    #[test]
+    fn collection_uses_the_exact_https_origin() {
+        for other in ["https://mitnielsbrock.dk:444/", "https://name@mitnielsbrock.dk/",
+                      "https://mitnielsbrock.dk@elsewhere.example/", "about:blank"] {
+            assert_eq!(site_of(&url(other)), None);
+        }
+        assert_eq!(site_of(&url("https://mitnielsbrock.dk:443/login")), Some(Site::MitNielsBrock));
+    }
+
 }

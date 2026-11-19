@@ -1677,6 +1677,9 @@ function Homework({
   );
 }
 
+const maxPreviewRows = 5000;
+const previewIdentity = (item: ImportItem) => JSON.stringify([item.external_id, item.subject]);
+
 function ImportCenter({ lang, refresh, navigate }: {
   lang: Language; refresh: () => void; navigate: (view: View) => void;
 }) {
@@ -1696,12 +1699,12 @@ function ImportCenter({ lang, refresh, navigate }: {
       toast.error(errorDetail(e, da ? "Teksten kunne ikke læses" : "The text could not be read")),
   });
   const commit = useMutation({
-    mutationFn: (payload: { source: ImportSource; items: ImportItem[] }) =>
-      apiPost<ImportCommit>("/imports/commit", payload),
-    onSuccess: (result) => {
-      setItems([]);
-      setContent("");
-      setMeta(null);
+    mutationFn: ({ source, items }: { source: ImportSource; items: ImportItem[]; text: string }) =>
+      apiPost<ImportCommit>("/imports/commit", { source, items }),
+    onSuccess: (result, submitted) => {
+      const reviewed = new Set(submitted.items.map(previewIdentity));
+      setItems(current => current.filter(item => !reviewed.has(previewIdentity(item))));
+      setContent(current => current === submitted.text ? "" : current);
       refresh();
       toast.success(result.message);
     },
@@ -1718,8 +1721,17 @@ function ImportCenter({ lang, refresh, navigate }: {
       listen<ImportPreview>("school-import", ({ payload }) => {
         setSource(payload.source);
         setItems(current => {
-          const known = new Set(current.map(i => JSON.stringify([i.external_id, i.subject])));
-          return [...current, ...payload.items.filter(i => !known.has(JSON.stringify([i.external_id, i.subject])))];
+          const known = new Set(current.map(previewIdentity));
+          const combined = [...current];
+          for (const item of payload.items) {
+            if (combined.length >= maxPreviewRows) break;
+            const id = previewIdentity(item);
+            if (!known.has(id)) {
+              known.add(id);
+              combined.push(item);
+            }
+          }
+          return combined;
         });
         setMeta({ format: payload.detected_format, warnings: payload.warnings });
         if (payload.items.length) toast.success(`${payload.items.length} · ${payload.source_label}`, {
@@ -1868,7 +1880,7 @@ function ImportCenter({ lang, refresh, navigate }: {
                     : "Deselect all"}
               </Button>
               <Button
-                onClick={() => commit.mutate({ source, items })}
+                onClick={() => commit.mutate({ source, items, text: content })}
                 disabled={!selectedCount || commit.isPending}
                 className="bg-blue-600 hover:bg-blue-700"
                 data-testid="import-commit-button"
@@ -1878,6 +1890,9 @@ function ImportCenter({ lang, refresh, navigate }: {
             </div>
           </CardHeader>
           <CardContent className="space-y-2">
+            {items.length >= maxPreviewRows && <p role="status" className="text-sm text-amber-700">
+              {da ? "Gennemse og gem disse 5.000 rækker, før du henter flere sider." : "Review and save these 5,000 rows before fetching more pages."}
+            </p>}
             {warnings.map((warning) => (
               <p className="rounded-lg bg-amber-50 p-3 text-xs text-amber-700" key={warning} data-testid="import-warning">
                 {warning}

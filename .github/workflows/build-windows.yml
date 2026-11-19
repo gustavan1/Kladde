@@ -91,6 +91,7 @@ jobs:
           codesign --verify --deep --strict "$app"
           exe="$app/Contents/MacOS/kladde"
           lipo "$exe" -verify_arch arm64
+          swift scripts/test-mac-launch.swift "$exe" "$RUNNER_TEMP/kladde-launch-data"
           export KLADDE_TEST_CODEX="$app/Contents/MacOS/kladde-codex"
           "$KLADDE_TEST_CODEX" --version
           cargo test --locked --manifest-path src-tauri/Cargo.toml bundled_server_starts_without_credentials -- --ignored
@@ -161,6 +162,14 @@ jobs:
           }
           prepare cli 'Dm8s/4aiE52HsBh+Gz3uSrh+fEykRICA1VoAnQA80IqHoTRncPg+q4rGvuhmyNsHUPg3QrPjUrTUSfWmXLVVEw=='
           prepare cli-linux-x64-gnu 'OIun574QsULxaZ5SmPDX4D8bO95RBmYJshu8yGFy0RSyCMKEs/y+o3BThot4fbCv4ttC1Tq6Hzt0QRHXCIgp7w=='
+      - name: Load the updater public key from the reviewed revision
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          sudo apt-get install --yes minisign
+          gh api -H 'Accept: application/vnd.github.raw+json' "repos/$GITHUB_REPOSITORY/contents/src-tauri/tauri.conf.json?ref=$GITHUB_SHA" |
+            jq -er '.plugins.updater.pubkey' | base64 --decode > "$RUNNER_TEMP/kladde-update.pub"
       - name: Sign tested build artifacts
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.KLADDE_UPDATE_SIGNING_KEY }}
@@ -176,6 +185,13 @@ jobs:
             test -s "$file"
             node "$RUNNER_TEMP/kladde-signer/node_modules/@tauri-apps/cli/tauri.js" signer sign --app-version "$version" "$file"
             test -s "$file.sig"
+          done
+      - name: Verify both signatures with the key trusted by installed copies
+        run: |
+          set -euo pipefail
+          for file in installers/*_x64-setup.exe installers/Kladde.app.tar.gz; do
+            base64 --decode "$file.sig" > "$RUNNER_TEMP/kladde-artifact.minisig"
+            minisign -Vm "$file" -p "$RUNNER_TEMP/kladde-update.pub" -x "$RUNNER_TEMP/kladde-artifact.minisig"
           done
       - name: Write latest.json for the in-app updater
         env:

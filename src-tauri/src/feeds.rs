@@ -51,8 +51,10 @@ fn public_address(ip: IpAddr) -> bool {
 fn resolve_public(name: &str, deadline: Instant) -> std::io::Result<Vec<SocketAddr>> {
     use std::io::{Error, ErrorKind};
     static ACTIVE: AtomicUsize = AtomicUsize::new(0);
-    ACTIVE.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| (n < 8).then_some(n + 1))
-        .map_err(|_| Error::other("Calendar resolver busy"))?;
+    if ACTIVE.fetch_add(1, Ordering::Relaxed) >= 8 {
+        ACTIVE.fetch_sub(1, Ordering::Relaxed);
+        return Err(Error::other("Calendar resolver busy"));
+    }
     let (tx, rx) = mpsc::sync_channel(1);
     let name = name.to_owned();
     if let Err(e) = std::thread::Builder::new().spawn(move || {
@@ -509,4 +511,30 @@ mod tests {
         assert_eq!(normalize_url("x.dk/a.ics").unwrap(), "https://x.dk/a.ics");
         assert!(normalize_url("http://x.dk/a.ics").is_err());
     }
+    #[test]
+    fn invalid_or_truncated_calendars_retain_cached_lessons() {
+        let (mut d, now) = setup();
+        apply_sync(&mut d, "f1", Ok(ICS.into()), false, &now).unwrap();
+        let saved = d.blocks.clone();
+        for invalid in ["BEGIN:VCALENDAR\nBEGIN:VEVENT\n", "BEGIN:VCALENDAR\nEND:VEVENT\nEND:VCALENDAR"] {
+            apply_sync(&mut d, "f1", Ok(invalid.into()), false, &now).unwrap();
+            assert_eq!(d.blocks, saved);
+            assert_eq!(d.feeds[0].last_status, "error");
+        }
+        apply_sync(&mut d, "f1", Ok("begin:vcalendar\nend:vcalendar\n".into()), false, &now).unwrap();
+        assert_eq!(d.feeds[0].last_status, "ok");
+        assert!(d.blocks.iter().all(|b| b.source.as_deref() != Some("feed:f1")));
+    }
+
+    #[test]
+    fn resolver_accepts_only_public_network_destinations() {
+        for ip in ["127.0.0.1", "192.168.4.5", "100.64.1.3", "169.254.1.3", "::1", "fe80::1", "::ffff:10.0.0.1", "2002::1"] {
+            assert!(!public_address(ip.parse().unwrap()), "{ip}");
+        }
+        for ip in ["1.1.1.1", "2606:4700:4700::1111"] { assert!(public_address(ip.parse().unwrap())); }
+        for url in ["file:///calendar", "http://example.org/cal", "https://person:secret@example.org/calendar"] {
+            assert!(normalize_url(url).is_err());
+        }
+    }
+
 }

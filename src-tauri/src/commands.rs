@@ -179,20 +179,21 @@ pub async fn export_backup(app: AppHandle, state: State<'_, AppState>, lang: Opt
     }
     let Some(chosen) = dialog.blocking_save_file() else { return Ok(None) };
     let path = chosen.into_path().map_err(|e| err(500, e.to_string()))?;
-    let snapshot = {
-        let store = lock(&state);
-        if path.try_exists().map_err(|e| err(500, e.to_string()))?
-            && same_file::is_same_file(&path, store.path()).map_err(|e| err(500, e.to_string()))? {
-            return Err(err(400, tr(&lang, "Vælg en anden fil end den aktive datafil.", "Choose a destination other than the active data file.")));
-        }
-        let mut copy = store.data.clone();
-        for feed in &mut copy.feeds {
-            feed.url.clear();
-        }
-        copy
-    };
+    let snapshot = backup_copy(&lock(&state), &path, &lang)?;
     write_snapshot(&path, &snapshot)?;
     Ok(Some(path.display().to_string()))
+}
+
+fn backup_copy(store: &Store, path: &std::path::Path, lang: &Option<String>) -> Res<crate::store::Data> {
+    if path.try_exists().map_err(|e| err(500, e.to_string()))?
+        && same_file::is_same_file(path, store.path()).map_err(|e| err(500, e.to_string()))? {
+        return Err(err(400, tr(lang, "Vælg en anden fil end den aktive datafil.", "Choose a destination other than the active data file.")));
+    }
+    let mut copy = store.data.clone();
+    for feed in &mut copy.feeds {
+        feed.url.clear();
+    }
+    Ok(copy)
 }
 
 // ---------- Subjects ----------
@@ -455,14 +456,20 @@ fn stage_task(store: &mut Transaction<'_>, body: &Value, lang: &Option<String>, 
 
 #[tauri::command]
 pub fn create_project_tasks(state: State<'_, AppState>, lang: Option<String>, body: Value) -> Res<()> {
-    let items = body["items"].as_array().filter(|a| (1..=12).contains(&a.len())).ok_or_else(|| err(400, "Expected 1–12 project steps"))?;
     let mut guard = lock(&state);
     let mut tx = guard.transaction();
+    stage_project(&mut tx, &body, &lang)?;
+    tx.commit()?;
+    Ok(())
+}
+
+fn stage_project(tx: &mut Transaction<'_>, body: &Value, lang: &Option<String>) -> Res<()> {
+    let items = body["items"].as_array().filter(|a| (1..=12).contains(&a.len()))
+        .ok_or_else(|| err(400, "Expected 1–12 project steps"))?;
     for item in items {
         let id = item["id"].as_str().and_then(|s| uuid::Uuid::parse_str(s).ok()).ok_or_else(|| err(400, "Invalid project step ID"))?.to_string();
-        if !tx.data.tasks.iter().any(|t| t.id == id) { stage_task(&mut tx, item, &lang, id)?; }
+        if !tx.data.tasks.iter().any(|t| t.id == id) { stage_task(tx, item, lang, id)?; }
     }
-    tx.commit()?;
     Ok(())
 }
 
@@ -854,4 +861,69 @@ mod tests {
         note = json!({"title": "ø".repeat(301)});
         assert!(note_fields(&mut edit, &None, &note).is_err());
     }
+    #[test]
+    fn subject_rename_updates_records_and_is_atomic_on_collision() {
+        use crate::store::{ChatMessage, Data};
+        let mut d = Data::default();
+        let original = d.subjects[0].clone();
+        d.notes.push(Note { subject_key: original.key.clone(), subject: original.name.clone(), ..Default::default() });
+        d.tasks.push(Task { subject: original.name.clone(), subject_key: original.key.clone(), ..Default::default() });
+        d.blocks.push(Block { subject: original.name.clone(), ..Default::default() });
+        d.messages.push(ChatMessage { subject: original.name.clone(), ..Default::default() });
+        let before = d.clone();
+        let taken = d.subjects[1].name.clone();
+        assert_eq!(rename_in_data(&mut d, &original.id, &taken, &None).unwrap_err().status, 409);
+        assert_eq!(d, before);
+        let renamed = rename_in_data(&mut d, &original.id, "Literature", &None).unwrap();
+        assert_eq!(renamed.id, original.id);
+        assert_eq!((&d.notes[0].subject_key, &d.tasks[0].subject_key), (&renamed.key, &renamed.key));
+        assert_eq!((&d.blocks[0].subject, &d.messages[0].subject), (&renamed.name, &renamed.name));
+    }
+
+    #[test]
+    fn portable_backup_rejects_live_file_alias_and_redacts_only_the_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let live = dir.path().join("kladde.json");
+        let mut store = Store::open(&live).unwrap();
+        let alias = dir.path().join("alias.json");
+        std::fs::hard_link(&live, &alias).unwrap();
+        assert!(backup_copy(&store, &live, &None).is_err());
+        assert!(backup_copy(&store, &alias, &None).is_err());
+        store.data.feeds.push(CalendarFeed { id: "f".into(), url: "https://example.org/calendar/private".into(), ..Default::default() });
+        let path = dir.path().join("backup.json");
+        write_snapshot(&path, &backup_copy(&store, &path, &None).unwrap()).unwrap();
+        assert!(!std::fs::read_to_string(&path).unwrap().contains("private"));
+        let restored = Store::open(&path).unwrap();
+        assert_eq!(feeds::feed_out(&restored.data.feeds[0])["needs_url"], true);
+        assert!(!store.data.feeds[0].url.is_empty());
+    }
+
+    #[test]
+    fn overdue_timed_import_stays_open_and_caps_the_estimate() {
+        let mut data = crate::store::Data::default();
+        let items = [json!({"kind":"deadline","selected":true,"title":"Essay","subject":"Dansk",
+            "date":"2020-01-02","time":"22:45","estimated_minutes":1e25})];
+        assert_eq!(import_items(&mut data, &items, &None)["imported_tasks"], 1);
+        let t = &data.tasks[0];
+        assert_eq!((t.status.as_str(), t.completed_at.as_deref(), t.deadline_time.as_deref(), t.estimated_minutes), ("todo", None, Some("22:45"), 1440));
+        assert!(!is_date("2026-02-30"));
+        assert!(!is_hhmm("24:05"));
+    }
+
+    #[test]
+    fn project_steps_save_together_and_retry_without_duplicates() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&dir.path().join("kladde.json")).unwrap();
+        let mut body = json!({"items":[{"id":new_id(), "title":"Read"}, {"id":new_id(), "title":""}]});
+        assert!(stage_project(&mut store.transaction(), &body, &None).is_err());
+        assert!(store.data.tasks.is_empty());
+        body["items"][1]["title"] = json!("Write");
+        for _ in 0..2 {
+            let mut tx = store.transaction();
+            stage_project(&mut tx, &body, &None).unwrap();
+            tx.commit().unwrap();
+        }
+        assert_eq!(Store::open(store.path()).unwrap().data.tasks.len(), 2);
+    }
+
 }

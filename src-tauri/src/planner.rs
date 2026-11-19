@@ -353,4 +353,17 @@ mod tests {
         let monday = weekly_summary(&data(vec![]), &at(2026, 11, 23, 0, 5));
         assert_eq!((monday.week_start.as_str(), monday.is_sunday), ("2026-11-23", false));
     }
+    #[test]
+    fn partial_evening_slot_is_dated_and_counts_only_in_its_own_week() {
+        let mut d = data(vec![task("Essay", "2026-11-19", 45, "high", "todo")]);
+        d.blocks.push(Block { day: "Onsdag".into(), time: "19:30".into(), minutes: Some(45), ..Default::default() });
+        let now = at(2026, 11, 18, 18, 45);
+        let plan = make_study_plan(&d, false, &now).unwrap();
+        assert_eq!(summary(&plan), [row("Essay", "Onsdag", "19:00", 30)]);
+        assert_eq!(plan.blocks[0].scheduled_on.as_deref(), Some("2026-11-18"));
+        d.blocks.extend(plan.blocks);
+        assert_eq!(weekly_summary(&d, &now).planned_focus_minutes, 30);
+        assert_eq!(weekly_summary(&d, &at(2026, 11, 23, 8, 0)).planned_focus_minutes, 0);
+    }
+
 }

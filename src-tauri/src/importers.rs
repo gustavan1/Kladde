@@ -1374,4 +1374,20 @@ mod tests {
         ];
         assert_eq!(parse_ics(ics, Local::now().date_naive()).unwrap(), expected);
     }
+    #[test]
+    fn expanded_text_budget_is_shared_across_series() {
+        let calendar = "BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:a\nSUMMARY:School\nDTSTART;VALUE=DATE:20261118\nRRULE:FREQ=DAILY;COUNT=2\nEND:VEVENT\nBEGIN:VEVENT\nUID:b\nSUMMARY:School\nDTSTART;VALUE=DATE:20261118\nRRULE:FREQ=DAILY;COUNT=2\nEND:VEVENT\nEND:VCALENDAR";
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 11, 18).unwrap();
+        assert!(parse_ics_with_limits(calendar, today, 27, 50).is_err());
+        assert_eq!(parse_ics_with_limits(calendar, today, 28, 50).unwrap().len(), 4);
+    }
+
+    #[test]
+    fn quoted_commas_do_not_change_semicolon_csv_or_hide_an_unfinished_field() {
+        let csv = "Opgave;Fag;Frist\n\"one, two, three, four, five\";Dansk;2026-11-25";
+        assert_eq!(parse_import("lectio", csv, false).unwrap().items[0].title, "one, two, three, four, five");
+        assert!(parse_import("lectio", "Opgave,Frist\n\"Unfinished,2026-11-25", false).is_err());
+        assert_eq!(parse_date("14/9/202").0, None);
+    }
+
 }

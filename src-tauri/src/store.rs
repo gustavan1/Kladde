@@ -646,4 +646,32 @@ mod tests {
         let t = Utc.with_ymd_and_hms(2026, 11, 18, 11, 42, 6).unwrap() + Duration::milliseconds(439);
         assert_eq!(iso(t), "2026-11-18T11:42:06.439Z");
     }
+    #[test]
+    fn incompatible_data_is_left_byte_for_byte_intact() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("kladde.json");
+        for source in [
+            r#"{"version":2,"notes":[{"id":"n","extension":{"text":"legacy"}}]}"#,
+            r#"{"notes":[{"id":"n","content":{"text":"keep this"}}]}"#,
+            r#"{"tasks":[{"id":"same"},{"id":"same"}]}"#,
+            r#"{"notes":[{"title":"missing id"}]}"#,
+        ] {
+            fs::write(&path, source).unwrap();
+            assert!(Store::open(&path).is_err());
+            assert_eq!(fs::read_to_string(&path).unwrap(), source);
+        }
+    }
+
+    #[test]
+    fn unrelated_edit_preserves_unknown_fields_inside_known_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("kladde.json");
+        fs::write(&path, r#"{"notes":[{"id":"n","attachments":[{"name":"worksheet"}]}]}"#).unwrap();
+        let mut store = Store::open(&path).unwrap();
+        let mut tx = store.transaction();
+        tx.data.tasks.push(Task { id: "t".into(), ..Default::default() });
+        tx.commit().unwrap();
+        assert_eq!(Store::open(&path).unwrap().data.notes[0].extra["attachments"][0]["name"], "worksheet");
+    }
+
 }

@@ -301,4 +301,18 @@ mod tests {
         assert!(submit(dir, &args).is_err());
         assert!(draft_path(dir, "../kladde").is_err());
     }
+    #[test]
+    fn full_inbox_only_admits_a_new_draft_after_one_is_reviewed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        write(&dir.join("shared.json"), &json!({"shareId":"s","subject":"Dansk"})).unwrap();
+        let item = json!({"shareId":"s","kind":"note","title":"Review","content":"Text"});
+        for _ in 0..MAX_DRAFTS { submit(dir, &item).unwrap(); }
+        assert!(submit(dir, &item).is_err());
+        let ids = pending_ids(dir).unwrap();
+        assert_eq!(ids.len(), MAX_DRAFTS);
+        remove(&draft_path(dir, &ids[0]).unwrap()).unwrap();
+        assert!(submit(dir, &item).is_ok());
+    }
+
 }

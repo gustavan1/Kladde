@@ -598,13 +598,18 @@ pub fn ai_messages(state: tauri::State<'_, AppState>) -> Res<Vec<ChatMessage>> {
 
 #[tauri::command]
 pub fn ai_clear_chat(state: tauri::State<'_, AppState>) -> Res<Value> {
+    clear_history(&state)?;
+    Ok(json!({ "deleted": true }))
+}
+
+fn clear_history(state: &AppState) -> Res<()> {
     let mut guard = state.store.lock().unwrap_or_else(|p| p.into_inner());
     let mut store = guard.transaction();
     store.data.messages.clear();
     store.commit()?;
     // Read and update the generation under the same store mutex as the messages.
     state.chat_generation.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    Ok(json!({ "deleted": true }))
+    Ok(())
 }
 
 #[tauri::command]
@@ -655,30 +660,25 @@ pub async fn ai_chat(app: AppHandle, lang: Option<String>, body: Value) -> Res<C
     };
     let l = lang.clone();
     let answer = blocking(move || generate(&provider_app, &s, &system, contents, None, &l)).await?;
-    let state = app.state::<AppState>();
-    let mut guard = state.store.lock().unwrap_or_else(|p| p.into_inner());
-    let mut store = guard.transaction();
-    if state.chat_generation.load(std::sync::atomic::Ordering::Relaxed) != generation {
-        return Err(err(409, tr(&lang, "Samtalen er ryddet.", "The conversation was cleared.")));
-    }
-    store.data.messages.push(ChatMessage {
+    let message = |role: &str, content: String| ChatMessage {
         provider: provider.into(),
         id: new_id(),
-        role: "user".into(),
-        extra: Default::default(),
-        content: prompt,
+        role: role.into(),
         subject: subject.clone(),
+        content,
         created_at: now_iso(),
-    });
-    let reply = ChatMessage {
-        provider: provider.into(),
-        id: new_id(),
-        role: "assistant".into(),
-        extra: Default::default(),
-        content: answer,
-        subject,
-        created_at: now_iso(),
+        ..Default::default()
     };
+    save_chat_turn(&app.state::<AppState>(), generation, message("user", prompt), message("assistant", answer), &lang)
+}
+
+fn save_chat_turn(state: &AppState, generation: u64, question: ChatMessage, reply: ChatMessage, lang: &Option<String>) -> Res<ChatMessage> {
+    let mut guard = state.store.lock().unwrap_or_else(|p| p.into_inner());
+    if state.chat_generation.load(std::sync::atomic::Ordering::Relaxed) != generation {
+        return Err(err(409, tr(lang, "Samtalen er ryddet.", "The conversation was cleared.")));
+    }
+    let mut store = guard.transaction();
+    store.data.messages.push(question);
     store.data.messages.push(reply.clone());
     let len = store.data.messages.len();
     if len > 200 {
@@ -835,4 +835,24 @@ mod tests {
         assert_eq!(again.get().account, "a".repeat(32));
         assert_eq!(status(&again.get())["provider"], "cloudflare");
     }
+    #[test]
+    fn pending_chat_turn_cannot_restore_cleared_history_on_disk() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("kladde.json");
+        let state = AppState {
+            store: std::sync::Mutex::new(crate::store::Store::open(&path).unwrap()),
+            chat_generation: Default::default(),
+            refreshing: Default::default(),
+        };
+        let question = ChatMessage { id: new_id(), content: "Question".into(), ..Default::default() };
+        let reply = ChatMessage { id: new_id(), content: "Reply".into(), ..Default::default() };
+        let generation = state.chat_generation.load(std::sync::atomic::Ordering::Relaxed);
+        clear_history(&state).unwrap();
+        assert_eq!(save_chat_turn(&state, generation, question.clone(), reply.clone(), &None).unwrap_err().status, 409);
+        assert!(crate::store::Store::open(&path).unwrap().data.messages.is_empty());
+        let current = state.chat_generation.load(std::sync::atomic::Ordering::Relaxed);
+        save_chat_turn(&state, current, question, reply, &None).unwrap();
+        assert_eq!(crate::store::Store::open(&path).unwrap().data.messages.len(), 2);
+    }
+
 }
