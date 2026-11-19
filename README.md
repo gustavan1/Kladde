@@ -13,7 +13,7 @@ Kladde is a study app for notes, homework and a weekly study plan. It runs on Wi
 
 ### 1. Get the installer
 
-Choose your file from the [Kladde releases](https://github.com/gustavan1/Kladde/releases). If someone sent you the installer, you can use that copy.
+Download the installer directly from the official [Kladde releases](https://github.com/gustavan1/Kladde/releases). Before opening it, verify it against that release using the instructions below.
 
 | Computer | Download |
 | --- | --- |
@@ -22,7 +22,7 @@ Choose your file from the [Kladde releases](https://github.com/gustavan1/Kladde/
 
 ### 2. Install Kladde
 
-**Mac.** Open the DMG, drag **Kladde** into **Applications**, eject the disk image and open the app from Applications. This private build uses an ad-hoc signature. If macOS asks you to verify the developer, first try opening Kladde, then go to **System Settings → Privacy & Security → Open Anyway** for Kladde. This applies to this app only. [Apple’s instructions](https://support.apple.com/en-us/102445)
+**Mac.** After verifying the DMG, open it, drag **Kladde** into **Applications**, eject the disk image and open the app from Applications. This private build uses an ad-hoc signature. If macOS asks you to verify the developer, first try opening Kladde, then go to **System Settings → Privacy & Security → Open Anyway** for Kladde. This applies to this app only. [Apple’s instructions](https://support.apple.com/en-us/102445)
 
 **Windows**
 
@@ -36,21 +36,17 @@ Windows 10 and 11 already include the small part Kladde needs to show its window
 
 ### "Windows protected your PC"
 
-You might see a blue box that says **"Windows protected your PC"**. This happens because the installer isn't signed with a paid code-signing certificate. It doesn't mean anything is wrong. To continue:
-
-1. Click **More info**.
-2. Click **Run anyway**.
-
-Some antivirus programs may also ask about it the first time; choose to allow it.
+The Windows installer currently has no publisher certificate. If SmartScreen appears, verify the download first. If verification succeeds, choose **More info** and **Run anyway** for that verified file. If antivirus reports a threat, stop and report the release and filename through GitHub Security.
 
 ### Is the download safe?
 
-- **Only download Kladde from the [releases page](https://github.com/gustavan1/Kladde/releases)** (or a file sent by the person who made it for you).
+- **Only download Kladde from the [releases page](https://github.com/gustavan1/Kladde/releases)**.
 - **To check that a file is genuine:**
   1. Open PowerShell.
   2. Run `Get-FileHash` on the file, for example `Get-FileHash .\Kladde_1.3.40_x64-setup.exe`.
   3. Compare the result with the line for that file in `SHA256SUMS.txt` on the same release page.
-  - If they don't match, don't run the file.
+  - On macOS, run `shasum -a 256` with the path to the DMG in Terminal and compare the matching DMG entry.
+  - If the hashes differ, discard the download. The release attestation in SECURITY.md can also verify the publishing workflow.
 - **Updates are checked before they're installed:** Kladde only installs updates signed with the project's own key.
 - **More details:** see [SECURITY.md](SECURITY.md).
 
@@ -68,8 +64,8 @@ To open the folder, press **Windows key + R**, type `%APPDATA%\Kladde` and press
 
 **Make a backup.** Do one of these regularly, for example every week:
 
-- **In Kladde:** click **"Gem backup"** at the bottom of the window. A save window opens in **Documents**. Save the file there, or on OneDrive or a USB stick.
-- **By hand:** copy `kladde.json` from the folder above to somewhere safe.
+- **In Kladde:** click **"Gem backup"** at the bottom of the window. A save window opens in **Documents**. Save the file there, or on OneDrive or a USB stick. Export keeps your timetable but omits private calendar subscription links. After restoring, open Calendar links and choose **Reconnect link** for each calendar.
+- **By hand:** copy `kladde.json` from the folder above to private storage. This full copy includes any private calendar subscription URLs.
 
 **Restore a backup:**
 
@@ -87,7 +83,7 @@ To open the folder, press **Windows key + R**, type `%APPDATA%\Kladde` and press
 3. **Go to the page with your assignments** (on Mit Niels Brock: **Deadlines**). Kladde finds the list by itself; you don't need to press anything.
 4. Back in Kladde, the assignments are listed with ticks. Untick anything you don't want and click **Gem valgte**. Assignments you already have are left unticked.
 
-On a page without a clear list (for example Ludus **Lektier**), press **"Hent afleveringer fra denne side"** in the bottom-right corner. The AI then reads that one page and picks out what you have to hand in and when. This needs AI to be switched on (section 4), and it only happens when you press.
+On a page without a clear list (for example Ludus **Lektier**), press **"Hent afleveringer fra denne side"** in the bottom-right corner. The AI then reads that one page and picks out what you have to hand in and when. This needs AI to be switched on (section 4), and Kladde asks for confirmation before sending the page to your AI provider.
 
 Other ways (a calendar link, a file or copied text) are under **Andre måder** at the bottom of the page.
 
@@ -127,7 +123,7 @@ Kladde uses the hosted `@cf/openai/gpt-oss-20b` model. Workers Free includes 10,
 
 ## For the developer: making a new installer
 
-The **Build Kladde installers** GitHub Actions workflow builds a Windows x64 NSIS installer and an Apple Silicon DMG. Pull requests produce downloadable artifacts. A successful push to `main` publishes both installers as release assets. To share an unmerged build, run the workflow for its branch and select **Publish these installers as a prerelease**.
+The **Build Kladde installers** GitHub Actions workflow builds a Windows x64 NSIS installer and an Apple Silicon DMG. Pull requests produce downloadable artifacts. A successful push to `main` publishes both installers as release assets. Use the workflow artifacts to test branches. The manual prerelease option is available on protected `main`.
 
 **Updates reach installed copies automatically.**
 
@@ -135,7 +131,7 @@ The **Build Kladde installers** GitHub Actions workflow builds a Windows x64 NSI
 - The release includes `latest.json`, which installed copies read through `https://github.com/gustavan1/Kladde/releases/latest/download/latest.json`. They then offer the update.
 - Previews (prereleases) are never offered as updates.
 
-**Signing key.** Updates are signed with the key in the repository secret `TAURI_SIGNING_PRIVATE_KEY`. The matching public key is in `tauri.conf.json`.
+**Release signing.** Configure the GitHub environment `release-signing` to allow deployments only from protected `main`. Store the existing updater private key there as `KLADDE_UPDATE_SIGNING_KEY` and its password, if used, as `KLADDE_UPDATE_SIGNING_PASSWORD`. Remove the old repository-level signing secrets once the environment copies are in place. Installed copies trust the matching public key in `src-tauri/tauri.conf.json`.
 
 - Keep a backup of the private key file somewhere safe, for example a password manager.
 - If it's lost, installed copies can't verify new updates. You'd then need a new key pair, and everyone would install once by hand.

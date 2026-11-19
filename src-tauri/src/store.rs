@@ -19,6 +19,8 @@ pub struct Subject {
     pub name: String,
     pub key: String,
     pub color: String,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
@@ -32,6 +34,8 @@ pub struct Note {
     pub is_pinned: bool,
     pub created_at: String,
     pub updated_at: String,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -42,6 +46,8 @@ pub struct Task {
     pub subject: String,
     pub subject_key: String,
     pub deadline: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deadline_time: Option<String>,
     /// "todo" | "doing" | "done"
     pub status: String,
     /// "high" | "medium" | "low"
@@ -50,6 +56,8 @@ pub struct Task {
     pub created_at: String,
     pub completed_at: Option<String>,
     pub external_id: Option<String>,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
 }
 
 impl Default for Task {
@@ -60,6 +68,8 @@ impl Default for Task {
             subject: "Dansk".into(),
             subject_key: "dansk".into(),
             deadline: String::new(),
+            deadline_time: None,
+            extra: Map::new(),
             status: "todo".into(),
             priority: "medium".into(),
             estimated_minutes: 45,
@@ -76,6 +86,8 @@ pub struct Block {
     pub id: String,
     /// Danish weekday name, e.g. "Mandag".
     pub day: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scheduled_on: Option<String>,
     /// "HH:MM"
     pub time: String,
     pub label: String,
@@ -85,6 +97,8 @@ pub struct Block {
     pub source: Option<String>,
     pub minutes: Option<i64>,
     pub external_id: Option<String>,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
@@ -99,6 +113,8 @@ pub struct CalendarFeed {
     pub last_error: Option<String>,
     pub imported_tasks: i64,
     pub imported_blocks: i64,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
 }
 
 /// One message in the AI helper chat.
@@ -113,6 +129,8 @@ pub struct ChatMessage {
     pub content: String,
     pub subject: String,
     pub created_at: String,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -162,6 +180,7 @@ fn default_subjects() -> Vec<Subject> {
             name: (*name).into(),
             key: subject_key(name),
             color: (*color).into(),
+            extra: Map::new(),
         })
         .collect()
 }
@@ -197,6 +216,7 @@ impl Data {
             name: clean.to_string(),
             key,
             color: COLORS[self.subjects.len() % COLORS.len()].to_string(),
+            extra: Map::new(),
         };
         self.subjects.push(subject.clone());
         (subject, true)
@@ -234,13 +254,22 @@ impl Store {
         if let Some(dir) = path.parent() {
             fs::create_dir_all(dir).map_err(|e| format!("Kunne ikke oprette mappen {}: {e}", dir.display()))?;
         }
-        if path.exists() {
+        if path.try_exists().map_err(|e| e.to_string())? {
             let text = fs::read_to_string(path).map_err(|e| format!("Kunne ikke læse {}: {e}", path.display()))?;
             let mut value: Value = serde_json::from_str(text.trim_start_matches('\u{feff}'))
                 .map_err(|e| format!("Datafilen {} er ikke gyldig JSON ({e}).", path.display()))?;
-            tidy(&mut value);
+            tidy(&mut value)?;
+
             let data: Data = serde_json::from_value(value)
                 .map_err(|e| format!("Datafilen {} har et uventet indhold ({e}).", path.display()))?;
+            if data.version > default_version() {
+                return Err(format!("A newer Kladde version is required for data version {}.", data.version));
+            }
+            validate_ids(data.subjects.iter().map(|s| s.id.as_str()), "subjects")?;
+            validate_ids(data.notes.iter().map(|n| n.id.as_str()), "notes")?;
+            validate_ids(data.tasks.iter().map(|t| t.id.as_str()), "tasks")?;
+            validate_ids(data.blocks.iter().map(|b| b.id.as_str()), "blocks")?;
+            validate_ids(data.feeds.iter().map(|f| f.id.as_str()), "feeds")?;
             Ok(Store { path: path.to_path_buf(), data })
         } else {
             let store = Store { path: path.to_path_buf(), data: Data::default() };
@@ -249,20 +278,37 @@ impl Store {
         }
     }
 
-    /// Writes the file safely: first to kladde.json.tmp, then renamed over the real file, so a
-    /// crash or power cut never leaves a half-written data file.
+    pub fn path(&self) -> &Path { &self.path }
+
     fn write(&self, data: &Data) -> Result<(), String> {
-        let json = to_pretty_json(data)?;
-        let tmp = self.path.with_extension("json.tmp");
-        let write = || -> std::io::Result<()> {
-            let mut f = fs::File::create(&tmp)?;
-            f.write_all(json.as_bytes())?;
-            f.sync_all()?;
-            drop(f);
-            fs::rename(&tmp, &self.path)
-        };
-        write().map_err(|e| format!("Kunne ikke gemme {}: {e}", self.path.display()))
+        write_snapshot(&self.path, data)
     }
+}
+
+fn validate_ids<'a>(mut ids: impl Iterator<Item = &'a str>, collection: &str) -> Result<(), String> {
+    let mut seen = std::collections::HashSet::new();
+    if ids.all(|id| !id.is_empty() && !id.contains('/') && seen.insert(id)) {
+        Ok(())
+    } else {
+        Err(format!("Missing, ambiguous or duplicate ID in {collection}. Repair a copy of the data file."))
+    }
+}
+
+/// Complete and flush the replacement in the destination directory before switching filenames.
+pub fn write_snapshot(path: &Path, data: &Data) -> Result<(), String> {
+    let write = || -> std::io::Result<()> {
+        let dir = path.parent().ok_or_else(|| std::io::Error::other("Invalid destination"))?;
+        let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
+        {
+            let mut out = std::io::BufWriter::new(tmp.as_file_mut());
+            serde_json::to_writer_pretty(&mut out, data)?;
+            out.flush()?;
+        }
+        tmp.as_file().sync_all()?;
+        tmp.persist(path)?;
+        Ok(())
+    };
+    write().map_err(|e| format!("Kunne ikke gemme {}: {e}", path.display()))
 }
 
 enum Kind {
@@ -338,8 +384,8 @@ const FIELDS: [(&str, &[(&str, Kind)]); 5] = [
 /// Makes small type mistakes harmless instead of refusing to start: a null or wrong-typed value
 /// falls back to the default, numbers given as text or decimals are rounded to whole numbers,
 /// and numbers or true/false where text is expected become text.
-fn tidy(root: &mut Value) {
-    let Some(obj) = root.as_object_mut() else { return };
+fn tidy(root: &mut Value) -> Result<(), String> {
+    let obj = root.as_object_mut().ok_or("The data file must be an object.")?;
     for (list, fields) in FIELDS {
         let Some(Value::Array(items)) = obj.get_mut(list) else { continue };
         for item in items.iter_mut() {
@@ -352,6 +398,11 @@ fn tidy(root: &mut Value) {
                     (Kind::Text | Kind::OptText, Value::Number(n)) => Some(Value::String(n.to_string())),
                     (Kind::Text | Kind::OptText, Value::Bool(b)) => Some(Value::String(b.to_string())),
                     (Kind::Flag, Value::Bool(_)) => continue,
+                    (Kind::Flag, Value::String(s)) => match s.to_lowercase().as_str() {
+                        "true" | "ja" | "yes" => Some(Value::Bool(true)),
+                        "false" | "nej" | "no" => Some(Value::Bool(false)),
+                        _ => None,
+                    },
                     (Kind::Int | Kind::OptInt, Value::Number(n)) if n.is_i64() => continue,
                     (Kind::Int | Kind::OptInt, Value::Number(n)) => {
                         n.as_f64().filter(|f| f.is_finite() && f.abs() < 1e15).map(|f| Value::from(f.round() as i64))
@@ -361,6 +412,9 @@ fn tidy(root: &mut Value) {
                     }
                     _ => None,
                 };
+                if fixed.is_none() && !v.is_null() {
+                    return Err(format!("Invalid field {list}.{name}. Repair a copy of the data file."));
+                }
                 match (fixed, kind) {
                     (Some(f), _) => {
                         item.insert((*name).to_string(), f);
@@ -375,11 +429,7 @@ fn tidy(root: &mut Value) {
             }
         }
     }
-}
-
-/// JSON with 2-space indentation, like JSON.stringify(data, null, 2) in the old version.
-pub fn to_pretty_json(data: &Data) -> Result<String, String> {
-    serde_json::to_string_pretty(data).map_err(|e| e.to_string())
+    Ok(())
 }
 
 // ---------- ids, dates and names ----------
@@ -462,15 +512,18 @@ mod tests {
         let path = dir.path().join("kladde.json");
         let mut store = Store::open(&path).unwrap();
         let original = store.data.clone();
-        fs::create_dir(path.with_extension("json.tmp")).unwrap();
+        // Force the final replace to fail, after all replacement bytes have been written.
+        let blocked = dir.path().join("not-a-file");
+        fs::create_dir(&blocked).unwrap();
+        store.path = blocked;
         let mut edit = store.transaction();
-        edit.data.notes.push(Note::default());
+        edit.data.notes.push(Note { id: "n".into(), ..Note::default() });
         assert!(edit.commit().is_err());
         assert_eq!(store.data, original);
         assert_eq!(Store::open(&path).unwrap().data, original);
-        fs::remove_dir(path.with_extension("json.tmp")).unwrap();
+        store.path = path.clone();
         let mut retry = store.transaction();
-        retry.data.notes.push(Note::default());
+        retry.data.notes.push(Note { id: "n".into(), ..Note::default() });
         retry.commit().unwrap();
         assert_eq!(Store::open(&path).unwrap().data.notes.len(), 1);
     }
@@ -576,7 +629,7 @@ mod tests {
         let store = Store::open(&path).unwrap();
         let t = &store.data.tasks[0];
         assert_eq!((t.title.as_str(), t.estimated_minutes, t.completed_at.as_deref()), ("", 53, Some("5")));
-        assert!(!store.data.notes[0].is_pinned);
+        assert!(store.data.notes[0].is_pinned);
         assert_eq!(store.data.blocks[0].minutes, Some(90));
         assert_eq!(store.data.blocks[0].source.as_deref(), Some("3"));
         // Nothing is written until something changes.
@@ -593,4 +646,32 @@ mod tests {
         let t = Utc.with_ymd_and_hms(2026, 11, 18, 11, 42, 6).unwrap() + Duration::milliseconds(439);
         assert_eq!(iso(t), "2026-11-18T11:42:06.439Z");
     }
+    #[test]
+    fn incompatible_data_is_left_byte_for_byte_intact() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("kladde.json");
+        for source in [
+            r#"{"version":2,"notes":[{"id":"n","extension":{"text":"legacy"}}]}"#,
+            r#"{"notes":[{"id":"n","content":{"text":"keep this"}}]}"#,
+            r#"{"tasks":[{"id":"same"},{"id":"same"}]}"#,
+            r#"{"notes":[{"title":"missing id"}]}"#,
+        ] {
+            fs::write(&path, source).unwrap();
+            assert!(Store::open(&path).is_err());
+            assert_eq!(fs::read_to_string(&path).unwrap(), source);
+        }
+    }
+
+    #[test]
+    fn unrelated_edit_preserves_unknown_fields_inside_known_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("kladde.json");
+        fs::write(&path, r#"{"notes":[{"id":"n","attachments":[{"name":"worksheet"}]}]}"#).unwrap();
+        let mut store = Store::open(&path).unwrap();
+        let mut tx = store.transaction();
+        tx.data.tasks.push(Task { id: "t".into(), ..Default::default() });
+        tx.commit().unwrap();
+        assert_eq!(Store::open(&path).unwrap().data.notes[0].extra["attachments"][0]["name"], "worksheet");
+    }
+
 }

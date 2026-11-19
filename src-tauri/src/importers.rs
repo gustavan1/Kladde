@@ -14,6 +14,11 @@ use serde_json::Value;
 
 use crate::store::{day_name, local_date, DAY_NAMES};
 
+pub const MAX_IMPORT_ROWS: usize = 5_000;
+pub const MAX_CALENDAR_BYTES: usize = 8 * 1024 * 1024;
+const MAX_EVENTS: usize = 10_000;
+const MAX_EVENT_TEXT: usize = 16 * 1024 * 1024;
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct ImportItem {
     /// "deadline" | "lesson" | "subject"
@@ -186,7 +191,7 @@ pub fn guess_subject(text: &str, known: &[String]) -> String {
 
 fn valid_date(y: i32, m: u32, d: u32) -> Option<String> {
     let y = if y < 100 { y + 2000 } else { y };
-    // Written like the old version (a 3-digit year stays 3 digits), but impossible dates are rejected.
+    if !(1000..=9999).contains(&y) { return None; }
     chrono::NaiveDate::from_ymd_opt(y, m, d).map(|_| format!("{y}-{m:02}-{d:02}"))
 }
 
@@ -207,10 +212,8 @@ pub fn parse_date(raw: &str) -> (Option<String>, Option<String>) {
     let num = |x: &str| x.parse::<u32>().unwrap_or(0);
     if let Some(m) = ISO_DATE.captures(s) {
         let whole = m.get(0).unwrap();
-        // Same as the old version: the time is looked for after the length of the match,
-        // counted in UTF-16 units like JavaScript's slice().
-        let rest = String::from_utf16_lossy(&s.encode_utf16().skip(whole.as_str().len()).collect::<Vec<u16>>());
-        return (valid_date(num(&m[1]) as i32, num(&m[2]), num(&m[3])), parse_time(&rest));
+        let time = parse_time(&s[whole.end()..]).or_else(|| parse_time(&s[..whole.start()]));
+        return (valid_date(num(&m[1]) as i32, num(&m[2]), num(&m[3])), time);
     }
     if let Some(m) = DMY_DATE.captures(s) {
         let rest = &s[m.get(0).unwrap().end()..];
@@ -230,7 +233,7 @@ pub fn parse_date(raw: &str) -> (Option<String>, Option<String>) {
 }
 
 /// CSV parser with quote support; also handles tab-separated text copied from a web table.
-fn parse_delimited(text: &str, delimiter: char) -> Vec<Vec<String>> {
+fn parse_delimited(text: &str, delimiter: char) -> Result<Vec<Vec<String>>, ()> {
     let chars: Vec<char> = text.chars().collect();
     let mut rows: Vec<Vec<String>> = vec![];
     let mut row: Vec<String> = vec![];
@@ -268,6 +271,7 @@ fn parse_delimited(text: &str, delimiter: char) -> Vec<Vec<String>> {
             row.push(cell.trim().to_string());
             cell.clear();
             finish_row(&mut row, &mut rows);
+            if rows.len() > MAX_IMPORT_ROWS + 1 { return Err(()); }
         } else {
             cell.push(c);
         }
@@ -275,7 +279,8 @@ fn parse_delimited(text: &str, delimiter: char) -> Vec<Vec<String>> {
     }
     row.push(cell.trim().to_string());
     finish_row(&mut row, &mut rows);
-    rows
+    if quoted || rows.len() > MAX_IMPORT_ROWS + 1 { return Err(()); }
+    Ok(rows)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -485,6 +490,7 @@ pub fn parse_import(source: &str, content: &str, da: bool) -> Result<ImportPrevi
             },
             other => vec![other.clone()],
         };
+        if list.len() > MAX_IMPORT_ROWS { return Err(tr("For mange rækker.".into(), "Too many rows.".into())); }
         for raw in &list {
             let Some(obj) = raw.as_object() else { continue };
             let keys: Vec<String> = obj.keys().cloned().collect();
@@ -498,20 +504,22 @@ pub fn parse_import(source: &str, content: &str, da: bool) -> Result<ImportPrevi
             }
         }
     } else {
-        let first_lines = text.lines().take(5).collect::<Vec<_>>().join("\n");
-        let delimiter = if first_lines.contains('\t') {
-            '\t'
-        } else if first_lines.matches(';').count() > first_lines.matches(',').count() {
-            ';'
-        } else {
-            ','
-        };
+        // Prefer a delimiter that actually separates known header names. Commas in
+        // quoted descriptions on later rows do not define the file format.
+        let delimiter = ['\t', ';', ','].into_iter().max_by_key(|&d| {
+            text.lines().take(5).filter_map(|line| {
+                let rows = parse_delimited(line, d).ok()?;
+                Some(map_columns(rows.first()?).len())
+            }).max().unwrap_or(0)
+        }).unwrap_or(',');
         detected_format = match delimiter {
             '\t' => tr("Kopieret tabel".into(), "Copied table".into()),
             ';' => tr("CSV (semikolon)".into(), "CSV (semicolon)".into()),
             _ => "CSV".into(),
         };
-        let rows = parse_delimited(text, delimiter);
+        let rows = parse_delimited(text, delimiter).map_err(|_| tr(
+            "For mange rækker eller uafsluttet citeret felt.".into(), "Too many rows or an unterminated quoted field.".into(),
+        ))?;
         // The header is the row (among the first five) that names the most known columns.
         let mut header_idx = 0;
         let mut best: i64 = -1;
@@ -674,25 +682,68 @@ fn occurrence_key(start: chrono::DateTime<rrule::Tz>, all_day: bool) -> String {
     if all_day { start.date_naive().to_string() } else { start.timestamp().to_string() }
 }
 
+fn event_bodies(text: &str) -> Result<Vec<&str>, String> {
+    let mut stack = Vec::new();
+    let mut bodies = Vec::new();
+    let mut event_start = 0;
+    let mut offset = 0;
+    let mut finished = false;
+    for line in text.split_inclusive('\n') {
+        let property = line.trim_end_matches('\n');
+        let next = offset + line.len();
+        if let Some((key, name)) = property.split_once(':') {
+            if key.eq_ignore_ascii_case("BEGIN") {
+                if finished || stack.len() >= 32 || (stack.is_empty() && !name.eq_ignore_ascii_case("VCALENDAR")) {
+                    return Err("Invalid calendar envelope".into());
+                }
+                if name.eq_ignore_ascii_case("VEVENT") {
+                    if stack.len() != 1 { return Err("Invalid nested event".into()); }
+                    event_start = next;
+                }
+                stack.push(name);
+            } else if key.eq_ignore_ascii_case("END") {
+                if !stack.pop().is_some_and(|open| name.eq_ignore_ascii_case(open)) {
+                    return Err("Incomplete calendar component".into());
+                }
+                if name.eq_ignore_ascii_case("VEVENT") {
+                    if bodies.len() >= MAX_EVENTS { return Err("Too many calendar events".into()); }
+                    bodies.push(&text[event_start..offset]);
+                }
+                if stack.is_empty() { finished = true; }
+            }
+        }
+        if stack.is_empty() && !property.trim().is_empty() && !property.eq_ignore_ascii_case("END:VCALENDAR") {
+            return Err("Invalid calendar envelope".into());
+        }
+        offset = next;
+    }
+    if !finished || !stack.is_empty() { return Err("Incomplete calendar".into()); }
+    Ok(bodies)
+}
+
 pub fn parse_ics(text: &str, today: chrono::NaiveDate) -> Result<Vec<IcsEvent>, String> {
+    parse_ics_with_limits(text, today, MAX_EVENT_TEXT, 50_000)
+}
+
+fn parse_ics_with_limits(text: &str, today: chrono::NaiveDate, mut text_left: usize, mut candidates_left: usize) -> Result<Vec<IcsEvent>, String> {
     use chrono::Duration;
     use std::collections::HashSet;
 
-    let unfolded = text.replace("\r\n", "\n").replace('\r', "\n").replace("\n ", "").replace("\n\t", "");
+    if text.len() > MAX_CALENDAR_BYTES { return Err("Calendar exceeds size limit".into()); }
+    let unfolded = text.trim_start_matches('\u{feff}').replace("\r\n", "\n").replace('\r', "\n").replace("\n ", "").replace("\n\t", "");
     let mut events = vec![];
     let mut overrides = HashSet::new();
     let mut instances = vec![];
-    for component in unfolded.split("BEGIN:VEVENT").skip(1) {
-        // A cut-off last event is skipped; the rest of the calendar still counts.
-        let Some((body, _)) = component.split_once("END:VEVENT") else { continue };
+    for body in event_bodies(&unfolded)? {
         let mut fields = Vec::new();
         let mut nested = 0;
         for line in body.lines() {
             let Some((key, value)) = line.split_once(':') else { continue };
-            if key == "BEGIN" { nested += 1; continue }
-            if key == "END" { nested -= 1; continue }
+            if key.eq_ignore_ascii_case("BEGIN") { nested += 1; continue }
+            if key.eq_ignore_ascii_case("END") { nested -= 1; continue }
             if nested == 0 {
                 let (name, params) = key.split_once(';').unwrap_or((key, ""));
+                if fields.len() >= 2048 { return Err("Too many event properties".into()); }
                 fields.push(Property { name, params, value });
             }
         }
@@ -707,30 +758,35 @@ pub fn parse_ics(text: &str, today: chrono::NaiveDate) -> Result<Vec<IcsEvent>, 
         let Some(first) = start.datetime() else { continue };
         let end = get("DTEND").filter(|p| !p.all_day()).and_then(Property::datetime);
         let all_day = start.all_day();
-        let make_event = |at: chrono::DateTime<rrule::Tz>, instance| {
+        let description = get("DESCRIPTION").map_or("", |p| p.value);
+        let owned_bytes = uid.len() + summary.value.len() + description.len();
+        let mut make_event = |at: chrono::DateTime<rrule::Tz>, instance| -> Result<IcsEvent, String> {
+            text_left = text_left.checked_sub(owned_bytes).ok_or("Expanded calendar text exceeds limit")?;
             let local = at.with_timezone(&Local);
             let date = if all_day { at.date_naive().to_string() } else { local_date(&local) };
             let time = (!all_day).then(|| local.format("%H:%M").to_string());
             let uid = if uid.is_empty() {
                 ext_id(&[Some(summary.value), Some(&date), time.as_deref()])
             } else { uid.to_string() };
-            IcsEvent {
+            Ok(IcsEvent {
                 uid, recurrence_id: instance, date, time, all_day,
                 end_time: end.map(|e| (local + (e - first)).format("%H:%M").to_string()),
                 summary: unescape_ics(summary.value).trim().into(),
-                description: get("DESCRIPTION").map(|p| unescape_ics(p.value).trim().into()).unwrap_or_default(),
-            }
+                description: unescape_ics(description).trim().into(),
+            })
         };
         if !fields.iter().any(|p| p.name.eq_ignore_ascii_case("RRULE") || p.name.eq_ignore_ascii_case("RDATE")) {
-            events.push(make_event(first, recurrence));
+            if events.len() + instances.len() >= MAX_EVENTS { return Err("Too many calendar events".into()); }
+            events.push(make_event(first, recurrence)?);
             continue;
         }
         // One odd series (unknown rule, too fine-grained, too many dates) is skipped on its
         // own instead of making the whole calendar fail.
-        let expand = || -> Result<Vec<chrono::DateTime<rrule::Tz>>, &'static str> {
+        let expand = || -> Result<_, &'static str> {
             let mut set = rrule::RRuleSet::new(first).rdate(first);
             for p in fields.iter().copied() {
                 if p.name.eq_ignore_ascii_case("RRULE") {
+                    if p.value.len() > 2048 || !set.get_rrule().is_empty() { return Err("Unsupported recurrence rule"); }
                     let rule = p.value.parse::<rrule::RRule<rrule::Unvalidated>>().and_then(|r| r.validate(first))
                         .map_err(|_| "Invalid RRULE")?;
                     // School timetables have at most hourly occurrences. Very fine frequencies can
@@ -738,8 +794,14 @@ pub fn parse_ics(text: &str, today: chrono::NaiveDate) -> Result<Vec<IcsEvent>, 
                     if matches!(rule.get_freq(), rrule::Frequency::Secondly | rrule::Frequency::Minutely) {
                         return Err("Unsupported sub-hourly calendar series");
                     }
+                    if rule.get_by_hour().len().max(1) * rule.get_by_minute().len().max(1) * rule.get_by_second().len().max(1) > 24 {
+                        return Err("Unsupported sub-hourly calendar series");
+                    }
                     set = set.rrule(rule);
                 } else if p.name.eq_ignore_ascii_case("RDATE") || p.name.eq_ignore_ascii_case("EXDATE") {
+                    if set.get_rdate().len() + set.get_exdate().len() + p.value.matches(',').count() + 1 > MAX_EVENTS {
+                        return Err("Calendar series exceeds expansion limit");
+                    }
                     for value in p.value.split(',') {
                         let Some(date) = Property { value, ..p }.datetime() else { continue };
                         set = if p.name.eq_ignore_ascii_case("RDATE") { set.rdate(date) } else { set.exdate(date) };
@@ -752,20 +814,26 @@ pub fn parse_ics(text: &str, today: chrono::NaiveDate) -> Result<Vec<IcsEvent>, 
             };
             let start_bound = bound(-2, 0).ok_or("Invalid calendar window")?;
             let end_bound = bound(182, 0).ok_or("Invalid calendar window")?;
-            let result = set.after(start_bound).before(end_bound).all(10_000);
+            // Count historical candidates as well as visible ones.
+            let result = set.before(end_bound).all(candidates_left.min(50_000) as u16);
             if result.limited { return Err("Calendar series exceeds expansion limit") }
-            Ok(result.dates)
+            Ok((start_bound, result.dates))
         };
-        let dates = match expand() {
+        if candidates_left == 0 { return Err("Calendar exceeds expansion limit".into()); }
+        let (start_bound, mut dates) = match expand() {
             Ok(dates) => dates,
+            Err("Calendar series exceeds expansion limit") => return Err("Calendar exceeds expansion limit".into()),
             Err(reason) => {
-                crate::log(&format!("Skipped calendar series {uid:?}: {reason}"));
+                crate::log(&format!("Skipped calendar series: {reason}"));
                 continue;
             }
         };
-        for at in dates {
+        candidates_left -= dates.len();
+        dates.dedup();
+        for at in dates.into_iter().filter(|at| at >= &start_bound) {
+            if events.len() + instances.len() >= MAX_EVENTS { return Err("Too many calendar events".into()); }
             let key = occurrence_key(at, all_day);
-            instances.push(make_event(at, Some(key)));
+            instances.push(make_event(at, Some(key))?);
         }
     }
     events.extend(instances.into_iter().filter(|e| {
@@ -800,7 +868,7 @@ mod tests {
 
     #[test]
     fn outlook_time_zones_and_odd_series_do_not_drop_lessons() {
-        let ics = "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:o365\r\nSUMMARY:Dansk modul\r\nDTSTART;TZID=Romance Standard Time:20261123T081500\r\nDTEND;TZID=Romance Standard Time:20261123T094500\r\nEND:VEVENT\r\nBEGIN:VEVENT\r\nUID:unknown-zone\r\nSUMMARY:Fysik\r\nDTSTART;TZID=Somewhere/Unknown:20261124T100000\r\nEND:VEVENT\r\nBEGIN:VEVENT\r\nUID:bad\r\nSUMMARY:Mærkelig serie\r\nDTSTART:20261123T081500\r\nRRULE:FREQ=WEEKLY;BYDAY=XX\r\nEND:VEVENT\r\nBEGIN:VEVENT\r\nUID:minutely\r\nSUMMARY:Hvert minut\r\nDTSTART:20261123T081500\r\nRRULE:FREQ=MINUTELY\r\nEND:VEVENT\r\nBEGIN:VEVENT\r\nUID:ok\r\nSUMMARY:Aflevering\r\nDTSTART;VALUE=DATE:20261125\r\nEND:VEVENT\r\nBEGIN:VEVENT\r\nUID:cut\r\nSUMMARY:Afskåret";
+        let ics = "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:o365\r\nSUMMARY:Dansk modul\r\nDTSTART;TZID=Romance Standard Time:20261123T081500\r\nDTEND;TZID=Romance Standard Time:20261123T094500\r\nEND:VEVENT\r\nBEGIN:VEVENT\r\nUID:unknown-zone\r\nSUMMARY:Fysik\r\nDTSTART;TZID=Somewhere/Unknown:20261124T100000\r\nEND:VEVENT\r\nBEGIN:VEVENT\r\nUID:bad\r\nSUMMARY:Mærkelig serie\r\nDTSTART:20261123T081500\r\nRRULE:FREQ=WEEKLY;BYDAY=XX\r\nEND:VEVENT\r\nBEGIN:VEVENT\r\nUID:minutely\r\nSUMMARY:Hvert minut\r\nDTSTART:20261123T081500\r\nRRULE:FREQ=MINUTELY\r\nEND:VEVENT\r\nBEGIN:VEVENT\r\nUID:ok\r\nSUMMARY:Aflevering\r\nDTSTART;VALUE=DATE:20261125\r\nEND:VEVENT\r\nEND:VCALENDAR";
         let today = chrono::NaiveDate::from_ymd_opt(2026, 11, 18).unwrap();
         let events = parse_ics(ics, today).unwrap();
         let names: Vec<&str> = events.iter().map(|e| e.summary.as_str()).collect();
@@ -1197,13 +1265,10 @@ mod tests {
     }
 
     #[test]
-    fn same_as_old_version_time_after_the_iso_date_is_found_like_before() {
-        check(
-            "lectio",
-            "Opgave,Frist\nA,æøå kl. 10.30 2026-09-14\nB,Afl. kl. 12.00 2026-09-14\nC,Lørdag 2026-09-19 kl. 23:59\nD,14/09/202",
-            true,
-            r#"{ "detected_format": "CSV", "items": [ { "kind": "deadline", "title": "A", "subject": "Selvstudie", "subject_key": "selvstudie", "date": "2026-09-14", "day": "Mandag", "time": null, "end_time": null, "notes": null, "external_id": "ae3bc941784be284", "selected": true, "estimated_minutes": null }, { "kind": "deadline", "title": "B", "subject": "Selvstudie", "subject_key": "selvstudie", "date": "2026-09-14", "day": "Mandag", "time": "02:00", "end_time": null, "notes": null, "external_id": "be392b7543078308", "selected": true, "estimated_minutes": null }, { "kind": "deadline", "title": "C", "subject": "Selvstudie", "subject_key": "selvstudie", "date": "2026-09-19", "day": "Lørdag", "time": "23:59", "end_time": null, "notes": null, "external_id": "a56f67851362720e", "selected": true, "estimated_minutes": null }, { "kind": "deadline", "title": "D", "subject": "Selvstudie", "subject_key": "selvstudie", "date": "202-09-14", "day": null, "time": null, "end_time": null, "notes": null, "external_id": "6603ab8f487fd2be", "selected": true, "estimated_minutes": null } ], "warnings": [] }"#,
-        );
+    fn times_before_and_after_iso_dates_are_read_at_their_full_offsets() {
+        assert_eq!(parse_date("æøå kl. 10.30 2026-09-14").1.as_deref(), Some("10:30"));
+        assert_eq!(parse_date("Afl. kl. 12.00 2026-09-14").1.as_deref(), Some("12:00"));
+        assert_eq!(parse_date("Lørdag 2026-09-19 kl. 23:59").1.as_deref(), Some("23:59"));
     }
 
     #[test]
@@ -1309,4 +1374,20 @@ mod tests {
         ];
         assert_eq!(parse_ics(ics, Local::now().date_naive()).unwrap(), expected);
     }
+    #[test]
+    fn expanded_text_budget_is_shared_across_series() {
+        let calendar = "BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:a\nSUMMARY:School\nDTSTART;VALUE=DATE:20261118\nRRULE:FREQ=DAILY;COUNT=2\nEND:VEVENT\nBEGIN:VEVENT\nUID:b\nSUMMARY:School\nDTSTART;VALUE=DATE:20261118\nRRULE:FREQ=DAILY;COUNT=2\nEND:VEVENT\nEND:VCALENDAR";
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 11, 18).unwrap();
+        assert!(parse_ics_with_limits(calendar, today, 27, 50).is_err());
+        assert_eq!(parse_ics_with_limits(calendar, today, 28, 50).unwrap().len(), 4);
+    }
+
+    #[test]
+    fn quoted_commas_do_not_change_semicolon_csv_or_hide_an_unfinished_field() {
+        let csv = "Opgave;Fag;Frist\n\"one, two, three, four, five\";Dansk;2026-11-25";
+        assert_eq!(parse_import("lectio", csv, false).unwrap().items[0].title, "one, two, three, four, five");
+        assert!(parse_import("lectio", "Opgave,Frist\n\"Unfinished,2026-11-25", false).is_err());
+        assert_eq!(parse_date("14/9/202").0, None);
+    }
+
 }

@@ -57,29 +57,19 @@ jobs:
       - if: runner.os == 'macOS'
         run: bash scripts/prepare-mac.sh
       - run: cargo test --locked --manifest-path src-tauri/Cargo.toml
+      - name: Exercise the school window and note subjects in the desktop app
+        run: npm run test:desktop
       - name: Build the Windows installer
         if: runner.os == 'Windows'
         shell: bash
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
-        run: |
-          # Without the signing key (e.g. a pull request from a fork) build without update files.
-          extra=()
-          if [[ -z "$TAURI_SIGNING_PRIVATE_KEY" ]]; then extra=(--config '{"bundle":{"createUpdaterArtifacts":false}}'); fi
-          npm run tauri -- build --target ${{ matrix.target }} --bundles nsis "${extra[@]}"
+        run: npm run tauri -- build --target x86_64-pc-windows-msvc --bundles nsis --config '{"bundle":{"createUpdaterArtifacts":false}}'
       - name: Build the disk image
         if: runner.os == 'macOS'
         shell: bash
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
         run: |
           set -o pipefail
-          extra=()
-          if [[ -z "$TAURI_SIGNING_PRIVATE_KEY" ]]; then extra=(--config '{"bundle":{"createUpdaterArtifacts":false}}'); fi
           for attempt in 1 2 3; do
-            if npm run tauri -- build --target aarch64-apple-darwin --bundles app,dmg "${extra[@]}" 2>&1 | tee "$RUNNER_TEMP/kladde-bundle.log"; then
+            if npm run tauri -- build --target aarch64-apple-darwin --bundles app,dmg --config '{"bundle":{"createUpdaterArtifacts":false}}' 2>&1 | tee "$RUNNER_TEMP/kladde-bundle.log"; then
               break
             fi
             if [[ "$attempt" == 3 ]] || ! grep -q 'hdiutil: create failed - Resource busy' "$RUNNER_TEMP/kladde-bundle.log"; then
@@ -101,6 +91,7 @@ jobs:
           codesign --verify --deep --strict "$app"
           exe="$app/Contents/MacOS/kladde"
           lipo "$exe" -verify_arch arm64
+          swift scripts/test-mac-launch.swift "$exe" "$RUNNER_TEMP/kladde-launch-data"
           export KLADDE_TEST_CODEX="$app/Contents/MacOS/kladde-codex"
           "$KLADDE_TEST_CODEX" --version
           cargo test --locked --manifest-path src-tauri/Cargo.toml bundled_server_starts_without_credentials -- --ignored
@@ -111,9 +102,9 @@ jobs:
           root=src-tauri/target/${{ matrix.target }}/release/bundle
           mkdir -p out
           cp "$root"/${{ matrix.bundle }}/*.${{ matrix.extension }} out/
-          # Signed update files: the setup .exe + .sig on Windows, Kladde.app.tar.gz + .sig on Mac.
-          shopt -s nullglob
-          for f in "$root"/nsis/*.exe.sig "$root"/macos/*.app.tar.gz "$root"/macos/*.app.tar.gz.sig; do cp "$f" out/; done
+          if [[ "$RUNNER_OS" == macOS ]]; then
+            COPYFILE_DISABLE=1 tar -czf out/Kladde.app.tar.gz -C "$root/macos" Kladde.app
+          fi
           ls -la out
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -130,8 +121,8 @@ jobs:
         with:
           node-version: 22
       - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
-      - name: npm packages (fails on high or critical advisories)
-        run: npm audit --audit-level=high
+      - name: npm packages (fails on known vulnerabilities)
+        run: npm audit --audit-level=low
       - name: Rust crates (fails on known vulnerabilities, RustSec database)
         run: |
           cargo install cargo-audit --locked --quiet
@@ -140,7 +131,11 @@ jobs:
 
   release:
     needs: [build, security]
-    if: (github.ref == 'refs/heads/main' && github.event_name == 'push') || (github.event_name == 'workflow_dispatch' && inputs.publish_preview)
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish_preview))
+    environment: release-signing
+    concurrency:
+      group: kladde-publish-${{ github.event_name == 'push' && 'stable' || github.run_id }}
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -152,6 +147,52 @@ jobs:
           pattern: Kladde-*
           merge-multiple: true
           path: installers
+      # No project checkout, lifecycle scripts, or build caches in this job.
+      - name: Prepare the pinned standalone Tauri signer
+        run: |
+          set -euo pipefail
+          scope="$RUNNER_TEMP/kladde-signer/node_modules/@tauri-apps"
+          prepare() {
+            local package="$1" digest="$2"
+            local archive="$RUNNER_TEMP/$package.tgz"
+            curl --fail --silent --show-error --location "https://registry.npmjs.org/@tauri-apps/$package/-/$package-2.12.5.tgz" -o "$archive"
+            [[ "$(openssl dgst -sha512 -binary "$archive" | openssl base64 -A)" == "$digest" ]]
+            mkdir -p "$scope/$package"
+            tar -xzf "$archive" -C "$scope/$package" --strip-components=1
+          }
+          prepare cli 'Dm8s/4aiE52HsBh+Gz3uSrh+fEykRICA1VoAnQA80IqHoTRncPg+q4rGvuhmyNsHUPg3QrPjUrTUSfWmXLVVEw=='
+          prepare cli-linux-x64-gnu 'OIun574QsULxaZ5SmPDX4D8bO95RBmYJshu8yGFy0RSyCMKEs/y+o3BThot4fbCv4ttC1Tq6Hzt0QRHXCIgp7w=='
+      - name: Load the updater public key from the reviewed revision
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          sudo apt-get install --yes minisign
+          gh api -H 'Accept: application/vnd.github.raw+json' "repos/$GITHUB_REPOSITORY/contents/src-tauri/tauri.conf.json?ref=$GITHUB_SHA" |
+            jq -er '.plugins.updater.pubkey' | base64 --decode > "$RUNNER_TEMP/kladde-update.pub"
+      - name: Sign tested build artifacts
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.KLADDE_UPDATE_SIGNING_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.KLADDE_UPDATE_SIGNING_PASSWORD }}
+        run: |
+          set -euo pipefail
+          : "${TAURI_SIGNING_PRIVATE_KEY:?Missing protected environment signing key}"
+          shopt -s nullglob
+          exe=(installers/Kladde_*_x64-setup.exe)
+          [[ ${#exe[@]} == 1 && "${exe[0]}" =~ ^installers/Kladde_([0-9]+\.[0-9]+\.[0-9]+)_x64-setup\.exe$ ]]
+          version="${BASH_REMATCH[1]}"
+          for file in "${exe[0]}" installers/Kladde.app.tar.gz; do
+            test -s "$file"
+            node "$RUNNER_TEMP/kladde-signer/node_modules/@tauri-apps/cli/tauri.js" signer sign --app-version "$version" "$file"
+            test -s "$file.sig"
+          done
+      - name: Verify both signatures with the key trusted by installed copies
+        run: |
+          set -euo pipefail
+          for file in installers/*_x64-setup.exe installers/Kladde.app.tar.gz; do
+            base64 --decode "$file.sig" > "$RUNNER_TEMP/kladde-artifact.minisig"
+            minisign -Vm "$file" -p "$RUNNER_TEMP/kladde-update.pub" -x "$RUNNER_TEMP/kladde-artifact.minisig"
+          done
       - name: Write latest.json for the in-app updater
         env:
           REPO: ${{ github.repository }}
@@ -159,6 +200,8 @@ jobs:
         run: |
           cd installers
           exe=$(ls *_x64-setup.exe)
+          test -s "$exe.sig"
+          test -s Kladde.app.tar.gz.sig
           version=$(echo "$exe" | sed -E 's/^Kladde_(.+)_x64-setup\.exe$/\1/')
           base="https://github.com/$REPO/releases/download/kladde-build-$BUILD_NUMBER"
           # Spaces in file names become dots in GitHub release asset names; none here.
@@ -189,6 +232,13 @@ jobs:
         run: |
           # Previews are prereleases, so installed apps keep following the latest normal release.
           flags=(--latest)
+          if [[ "$GITHUB_EVENT_NAME" == push ]]; then
+            tip=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)
+            if [[ "$tip" != "$GITHUB_SHA" ]]; then
+              echo "A newer main revision exists. Skipping promotion."
+              exit 0
+            fi
+          fi
           if [[ "$PUBLISH_PREVIEW" == "true" ]]; then flags=(--prerelease --latest=false); fi
           gh release create "kladde-build-$BUILD_NUMBER" "${flags[@]}" installers/* \
             --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "Kladde (build $BUILD_NUMBER)" \

@@ -42,8 +42,8 @@ export function AiView({ lang, subjects }: { lang: Language; subjects: Subject[]
   });
   const send = useMutation({
     mutationFn: (p: { prompt: string; subject: string }) => apiPost<Message>("/ai/chat", p),
-    onSuccess: () => {
-      setPrompt("");
+    onSuccess: (_, sent) => {
+      setPrompt(current => current.trim() === sent.prompt ? "" : current);
       void qc.invalidateQueries({ queryKey: ["ai-messages"] });
     },
     onError: (e) => toast.error(errorDetail(e, da ? "AI-hjælperen kunne ikke svare lige nu." : "The AI helper could not answer right now.")),
@@ -344,12 +344,12 @@ export function ProjectPlanner({
   const [details, setDetails] = useState("");
   const [subject, setSubject] = useState(subjects[0]?.name ?? "Dansk");
   const [deadline, setDeadline] = useState(today);
-  const [steps, setSteps] = useState<(PlanStep & { selected: boolean })[]>([]);
+  const [steps, setSteps] = useState<(PlanStep & { selected: boolean; id: string })[]>([]);
   const [advice, setAdvice] = useState("");
   const plan = useMutation({
     mutationFn: () => apiPost<{ steps: PlanStep[]; advice: string }>("/ai/project-plan", { title, details, subject, deadline }),
     onSuccess: (r) => {
-      setSteps(r.steps.map((s) => ({ ...s, selected: true })));
+      setSteps(r.steps.map((s) => ({ ...s, id: crypto.randomUUID(), selected: true })));
       setAdvice(r.advice);
     },
     onError: (e) => toast.error(errorDetail(e, da ? "Planen kunne ikke laves." : "The plan could not be made.")),
@@ -357,8 +357,7 @@ export function ProjectPlanner({
   const create = useMutation({
     mutationFn: async () => {
       const chosen = steps.filter((s) => s.selected);
-      for (const s of chosen)
-        await apiPost("/tasks", { title: `${s.title}`, subject, deadline: s.deadline, priority: s.priority, estimated_minutes: s.estimated_minutes });
+      await apiPost("/tasks/batch", { items: chosen.map(s => ({ ...s, subject })) });
       return chosen.length;
     },
     onSuccess: (n) => {

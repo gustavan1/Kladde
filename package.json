@@ -9,6 +9,7 @@
     "dist:mac": "bash scripts/prepare-mac.sh && tauri build --target aarch64-apple-darwin --bundles dmg",
     "dist:win": "tauri build --bundles nsis",
     "test": "cargo test --manifest-path src-tauri/Cargo.toml",
+    "test:desktop": "cargo build --locked --manifest-path src-tauri/Cargo.toml && node scripts/test-desktop.mjs",
     "vite": "vite",
     "build:web": "tsc -b && vite build",
     "typecheck": "tsc -b",

@@ -54,8 +54,8 @@ fn is_internal(url: &Url) -> bool {
 
 fn open_external(app: &AppHandle, url: &Url) {
     if matches!(url.scheme(), "http" | "https" | "mailto") {
-        if let Err(e) = app.opener().open_url(url.as_str(), None::<&str>) {
-            log(&format!("Could not open {url}: {e}"));
+        if app.opener().open_url(url.as_str(), None::<&str>).is_err() {
+            log("Could not open an external link.");
         }
     }
 }
@@ -68,9 +68,9 @@ fn open_url(app: AppHandle, url: String) -> Result<(), String> {
     if !matches!(parsed.scheme(), "http" | "https" | "mailto") {
         return Err("Only web and mail links can be opened".into());
     }
-    app.opener().open_url(parsed.as_str(), None::<&str>).map_err(|e| {
-        log(&format!("Could not open {parsed}: {e}"));
-        e.to_string()
+    app.opener().open_url(parsed.as_str(), None::<&str>).map_err(|_| {
+        log("Could not open an external link.");
+        "System handler could not open the link".to_string()
     })
 }
 
@@ -127,7 +127,7 @@ pub fn run() {
             let _ = LOG_FILE.set(dir.join("kladde.log"));
             match store::Store::open(&dir.join("kladde.json")) {
                 Ok(store) => {
-                    app.manage(AppState { store: Mutex::new(store) });
+                    app.manage(AppState { store: Mutex::new(store), chat_generation: Default::default(), refreshing: Default::default() });
                     // Provider preferences contain no credentials.
                     app.manage(ai::AiState::load(dir.join("providers.json")));
                     create_window(app.handle())?;
@@ -148,40 +148,51 @@ pub fn run() {
             }
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![
-            open_url,
-            school::open_school,
-            commands::dashboard,
-            commands::weekly_summary_cmd,
-            commands::export_backup,
-            commands::create_subject,
-            commands::create_note,
-            commands::update_note,
-            commands::delete_note,
-            commands::create_task,
-            commands::update_task,
-            commands::delete_task,
-            commands::create_block,
-            commands::delete_block,
-            commands::make_study_plan_cmd,
-            commands::clear_study_plan,
-            commands::import_preview,
-            commands::import_commit,
-            commands::list_feeds,
-            commands::add_feed,
-            commands::sync_feed,
-            commands::delete_feed,
-            ai::ai_status,
-            ai::ai_save_key,
-            ai::ai_codex,
-            claude::claude_action,
-            ai::ai_forget_key,
-            ai::ai_note,
-            ai::ai_project_plan,
-            ai::ai_messages,
-            ai::ai_clear_chat,
-            ai::ai_chat,
-        ])
+        .invoke_handler({
+            let dispatch: fn(tauri::ipc::Invoke<tauri::Wry>) -> bool = tauri::generate_handler![
+                open_url,
+                school::open_school,
+                commands::dashboard,
+                commands::weekly_summary_cmd,
+                commands::export_backup,
+                commands::create_subject,
+                commands::rename_subject,
+                commands::create_note,
+                commands::update_note,
+                commands::delete_note,
+                commands::create_task,
+                commands::create_project_tasks,
+                commands::update_task,
+                commands::delete_task,
+                commands::create_block,
+                commands::delete_block,
+                commands::make_study_plan_cmd,
+                commands::clear_study_plan,
+                commands::import_preview,
+                commands::import_commit,
+                commands::list_feeds,
+                commands::add_feed,
+                commands::sync_feed,
+                commands::delete_feed,
+                ai::ai_status,
+                ai::ai_save_key,
+                ai::ai_codex,
+                claude::claude_action,
+                ai::ai_forget_key,
+                ai::ai_note,
+                ai::ai_project_plan,
+                ai::ai_messages,
+                ai::ai_clear_chat,
+                ai::ai_chat,
+            ];
+            move |invoke: tauri::ipc::Invoke<tauri::Wry>| {
+                if invoke.message.webview_ref().label() != "main" {
+                    invoke.resolver.reject("This command requires the main window.");
+                    return true;
+                }
+                dispatch(invoke)
+            }
+        })
         .run(tauri::generate_context!())
         .expect("error while running Kladde");
 }

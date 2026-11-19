@@ -56,7 +56,7 @@ export function UpdateBanner({ lang }: { lang: Language }) {
         if (event.event === "Started") total = event.data.contentLength ?? 0;
         if (event.event === "Progress") {
           done += event.data.chunkLength;
-          setProgress(total ? Math.min(99, Math.round((done / total) * 100)) : null);
+          setProgress(total ? Math.min(99, Math.round((done / total) * 100)) : 0);
         }
       });
       // On Windows the installer closes and reopens Kladde itself; elsewhere restart here.
