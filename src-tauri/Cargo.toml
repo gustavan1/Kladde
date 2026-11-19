@@ -23,7 +23,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 uuid = { version = "1", features = ["v4"] }
 sha1_smol = "1"
 regex = "1"
-ureq = { version = "2", features = ["json"] }
+ureq = { version = "3", features = ["json"] }
 url = "2"
 rrule = "0.14"
 
