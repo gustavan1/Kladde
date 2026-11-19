@@ -36,7 +36,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
-import { formatStudyDate } from "@/lib/dates";
+import { formatStudyDate, localToday } from "@/lib/dates";
 import { ApiError, apiDelete, apiGet, apiPatch, apiPost, errorDetail, exportBackup } from "@/lib/api";
 
 type Language = "da" | "en";
@@ -1330,7 +1330,7 @@ function Homework({
   const [showDone, setShowDone] = useState(() => readStorage("kladde-show-done") !== "false");
   const formRef = useRef<HTMLDivElement>(null);
   const subjects = data?.subjects || [];
-  const today = data?.today || new Date().toISOString().slice(0, 10);
+  const today = data?.today || localToday();
   const update = useMutation({
     mutationFn: (p: { id: string; status: Task["status"] }) =>
       apiPatch<Task>(`/tasks/${p.id}`, { status: p.status }),
