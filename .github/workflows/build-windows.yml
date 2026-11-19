@@ -172,11 +172,17 @@ jobs:
             jq -er '.plugins.updater.pubkey' | base64 --decode > "$RUNNER_TEMP/kladde-update.pub"
       - name: Sign tested build artifacts
         env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.KLADDE_UPDATE_SIGNING_KEY }}
+          # Prefer the key in the protected release-signing environment. Until it has been
+          # added there, use the repository secret that signed the earlier releases.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.KLADDE_UPDATE_SIGNING_KEY || secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.KLADDE_UPDATE_SIGNING_PASSWORD }}
+          ENVIRONMENT_KEY_SET: ${{ secrets.KLADDE_UPDATE_SIGNING_KEY != '' }}
         run: |
           set -euo pipefail
-          : "${TAURI_SIGNING_PRIVATE_KEY:?Missing protected environment signing key}"
+          : "${TAURI_SIGNING_PRIVATE_KEY:?No signing key: add KLADDE_UPDATE_SIGNING_KEY to the release-signing environment}"
+          if [[ "$ENVIRONMENT_KEY_SET" != true ]]; then
+            echo "::warning::Signed with the repository secret TAURI_SIGNING_PRIVATE_KEY. Copy it to the release-signing environment as KLADDE_UPDATE_SIGNING_KEY, then remove the repository secret."
+          fi
           shopt -s nullglob
           exe=(installers/Kladde_*_x64-setup.exe)
           [[ ${#exe[@]} == 1 && "${exe[0]}" =~ ^installers/Kladde_([0-9]+\.[0-9]+\.[0-9]+)_x64-setup\.exe$ ]]
