@@ -35,6 +35,13 @@ Lessons from earlier sessions. Each one cost real time to find.
 - **Dates:** use the local date, not UTC, for "today" fallbacks. Students are
   in Europe/Copenhagen.
 
+- **Claude Code hooks in cloud sessions:**
+  - Don't write tracked files from a Stop hook. The environment's own stop
+    check demands a commit whenever the tree is dirty, so a file changed on
+    every Stop means every reply ends in "commit and push".
+  - Environment variables in `.claude/settings.json` don't reach claude-mem's
+    worker. Its settings go in `~/.claude-mem/settings.json`.
+
 ## Decisions
 
 - **AI:** Cloudflare Workers AI (`@cf/openai/gpt-oss-20b`) on both platforms,

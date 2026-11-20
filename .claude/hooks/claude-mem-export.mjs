@@ -1,17 +1,23 @@
-// Stop hook: saves what claude-mem recorded in this session into
+// UserPromptSubmit hook: saves what claude-mem recorded in this session into
 // .claude/memory/auto/, so it outlives the temporary cloud container. The
 // SessionStart hook (claude-mem-memory.mjs) imports those files again in later
 // sessions.
 //
-// It runs after every reply and rewrites this session's file only when its
-// content changed. claude-mem writes observations in the background, so the
-// newest ones may only appear after the next reply. It never fails the
+// It runs when the user sends a message, not on Stop. The cloud environment's
+// own Stop check demands a commit whenever the tree is dirty, so exporting on
+// Stop would leave every reply with uncommitted changes. Exporting at the start
+// of a turn lets the notes be committed with that turn's work.
+//
+// It rewrites the file only when at least MIN_NEW new observations have been
+// recorded since the last export, to keep commits rare. The last few
+// observations of a session may therefore not be saved. It never fails the
 // session: errors go to stderr and the hook exits 0.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
 const MAX_FILE_BYTES = 60 * 1024; // claude-mem imports files up to 64 KB
+const MIN_NEW = 5; // new observations needed before the files are rewritten
 
 try {
   const input = JSON.parse(fs.readFileSync(0, "utf8") || "{}");
@@ -45,8 +51,17 @@ try {
 
   const day = String(session.started_at || new Date().toISOString()).slice(0, 10);
   const base = `${day}-${sessionId.slice(0, 8)}`;
+  const outDir = path.join(projectDir, ".claude", "memory", "auto");
+  const firstFile = path.join(outDir, `${base}.md`);
+  if (fs.existsSync(firstFile)) {
+    const saved = Number(fs.readFileSync(firstFile, "utf8").match(/<!-- observations: (\d+) -->/)?.[1] ?? -1);
+    if (saved >= 0 && observations.length - saved < MIN_NEW) process.exit(0);
+  }
+
   const header = [
     `# Session ${day} (${sessionId.slice(0, 8)}), recorded by claude-mem`,
+    "",
+    `<!-- observations: ${observations.length} -->`,
     "",
     "Written automatically by .claude/hooks/claude-mem-export.mjs. These are",
     "claude-mem's own notes on the session, not reviewed by hand.",
@@ -92,7 +107,6 @@ try {
   }
   parts.push(current);
 
-  const outDir = path.join(projectDir, ".claude", "memory", "auto");
   fs.mkdirSync(outDir, { recursive: true });
   parts.forEach((text, i) => {
     const file = path.join(outDir, `${base}${i ? `-part${i + 1}` : ""}.md`);

@@ -6,7 +6,7 @@ Kladde is a Tauri 2 desktop study app (notes, homework, weekly study plan) for D
 
 ## Memory between sessions
 
-Notes from earlier sessions are in `.claude/memory/`: session histories, decisions and pitfalls, and how the owner likes to work. A SessionStart hook (`.claude/hooks/claude-mem-memory.mjs`) makes claude-mem import them as searchable memory, and a Stop hook (`.claude/hooks/claude-mem-export.mjs`) saves each session's claude-mem observations to `.claude/memory/auto/`. Search them before relearning something. Commit the `auto/` files with the session's work. At the end of a session that changed something worth remembering, add or update a note there and commit it (see `.claude/memory/README.md`).
+Notes from earlier sessions are in `.claude/memory/`: session histories, decisions and pitfalls, and how the owner likes to work. A SessionStart hook (`.claude/hooks/claude-mem-memory.mjs`) makes claude-mem import them as searchable memory, and a UserPromptSubmit hook (`.claude/hooks/claude-mem-export.mjs`) saves each session's claude-mem observations to `.claude/memory/auto/`. Search them before relearning something. Commit the `auto/` files with the session's work. At the end of a session that changed something worth remembering, add or update a note there and commit it (see `.claude/memory/README.md`).
 
 ## Commands
 

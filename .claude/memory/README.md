@@ -13,10 +13,11 @@ project, and re-imports a file when it changes.
 ## Automatic notes (`auto/`)
 
 claude-mem records observations on its own during every session, but they
-live in its database and are lost with the container. A Stop hook
-(`.claude/hooks/claude-mem-export.mjs`) runs after every reply and writes the
-current session's observations and summaries to
-`auto/<date>-<session>.md` (split into `-partN` files above 60 KB). Simple
+live in its database and are lost with the container. A UserPromptSubmit hook
+(`.claude/hooks/claude-mem-export.mjs`) runs when the owner sends a message.
+Once at least 5 new observations have built up, it writes the current
+session's observations and summaries to `auto/<date>-<session>.md` (split into
+`-partN` files above 60 KB). Simple
 secret patterns (tokens, keys, private keys, e-mail addresses) are redacted
 first. Commit these files with the session's work.
 
