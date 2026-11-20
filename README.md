@@ -131,7 +131,7 @@ The **Build Kladde installers** GitHub Actions workflow builds a Windows x64 NSI
 - The release includes `latest.json`, which installed copies read through `https://github.com/gustavan1/Kladde/releases/latest/download/latest.json`. They then offer the update.
 - Previews (prereleases) are never offered as updates.
 
-**Release signing.** Configure the GitHub environment `release-signing` to allow deployments only from protected `main`. Store the existing updater private key there as `KLADDE_UPDATE_SIGNING_KEY` and its password, if used, as `KLADDE_UPDATE_SIGNING_PASSWORD`. Until then, the release job signs with the repository secret `TAURI_SIGNING_PRIVATE_KEY` and shows a warning in the run. Remove the old repository-level signing secrets once the environment copies are in place. Installed copies trust the matching public key in `src-tauri/tauri.conf.json`.
+**Release signing.** The release job signs updates with `KLADDE_UPDATE_SIGNING_KEY` (and `KLADDE_UPDATE_SIGNING_PASSWORD`, only if the key has a password) from the GitHub environment `release-signing`, which allows deployments only from `main`. There is no repository-level signing secret. Installed copies trust the matching public key in `src-tauri/tauri.conf.json`.
 
 - Keep a backup of the private key file somewhere safe, for example a password manager.
 - If it's lost, installed copies can't verify new updates. You'd then need a new key pair, and everyone would install once by hand.

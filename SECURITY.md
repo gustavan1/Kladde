@@ -39,7 +39,7 @@ GitHub (not as a public issue). Include what you found and how to reproduce it.
 
 ## Release signing setup
 
-Restrict the GitHub environment `release-signing` to the protected `main` branch. Store the existing updater private key there as `KLADDE_UPDATE_SIGNING_KEY` and its password, if set, as `KLADDE_UPDATE_SIGNING_PASSWORD`. Use the existing key so installed clients continue trusting updates. Until the environment copy exists, the release job falls back to the repository secret `TAURI_SIGNING_PRIVATE_KEY` and warns in the run. Remove the old repository-level secret once the environment copy has been verified. Build and PR jobs do not use the production key. Only the separate release job signs the tested artifacts after the dependency audits.
+The updater private key is stored only as `KLADDE_UPDATE_SIGNING_KEY` in the GitHub environment `release-signing`, which is restricted to the `main` branch. Its password, if the key has one, is `KLADDE_UPDATE_SIGNING_PASSWORD` in the same environment. Do not add a repository-level copy, and never replace the key: installed clients only trust updates signed with it. Build and PR jobs do not use the production key. Only the separate release job signs the tested artifacts after the dependency audits.
 
 ## Check a download
 
