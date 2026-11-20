@@ -408,6 +408,8 @@ pub async fn open_school(app: AppHandle, lang: Option<String>, body: Value) -> R
                 return false;
             }
             // Logging in may pass through other sign-in sites; anything but web pages is refused.
+            // On macOS and Linux this also sees the empty frames sites embed (about:blank/srcdoc).
+            if matches!(url.as_str(), "about:blank" | "about:srcdoc") { return true }
             matches!(url.scheme(), "https" | "http") && (site_of(url).is_some() || !crate::is_internal(url))
         })
         .on_new_window(move |url, _features| {

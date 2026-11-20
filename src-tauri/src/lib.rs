@@ -82,6 +82,10 @@ fn create_window(app: &AppHandle) -> tauri::Result<()> {
         .inner_size(1320.0, 860.0)
         .min_inner_size(760.0, 560.0)
         .center()
+        // Kladde's own pages get a frozen Object.prototype. This is not the global
+        // `freezePrototype` setting, because Tauri would also apply that to the school window,
+        // where it breaks the Microsoft sign-in page that Mit Niels Brock uses.
+        .initialization_script("Object.freeze(Object.prototype)")
         .on_navigation(move |url| {
             if is_internal(url) {
                 true

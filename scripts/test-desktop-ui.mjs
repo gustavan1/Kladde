@@ -28,6 +28,7 @@ async function run() {
   const phase = await (await fetch("/__test/phase")).text();
   if (phase === "reopen") window.dispatchEvent(new Event("offline"));
   await control("workspace-shell");
+  if (!Object.isFrozen(Object.prototype)) throw new Error("Kladde's own window must keep Object.prototype frozen");
   await until(() => !byId("workspace-loading") && !byId("workspace-data-error"), "loaded dashboard");
   await fetch("/__test/visible", { method: "POST" });
   if (phase === "reopen") {
