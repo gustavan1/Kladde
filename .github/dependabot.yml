@@ -19,3 +19,7 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    groups:
+      # CodeQL refuses to run when its init and analyze steps are on different versions.
+      codeql-action:
+        patterns: ["github/codeql-action*"]
