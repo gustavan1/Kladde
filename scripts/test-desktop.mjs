@@ -107,6 +107,8 @@ try {
   assert.equal(saved.notes[0].content, "Keep this draft");
   assert.equal(saved.tasks.length, 1);
   assert.equal(saved.tasks[0].deadline_time, "19:15");
+  assert.equal(saved.tasks[0].subject, "Literature", "Homework moves to the chosen subject when its subject is deleted");
+  assert.ok(!saved.subjects.some(s => ["robotics", "dansk"].includes(s.key)), "Deleted subjects stay deleted");
   console.log("Desktop regression passed: school launch and preview, offline save, and subject editing across restart.");
 } finally {
   await vite.close();

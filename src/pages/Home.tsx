@@ -857,6 +857,7 @@ function Notes({
   const [filter, setFilter] = useState("");
   type SubjectForm = { name: string; original?: Subject; inEditor?: boolean };
   const [subjectForm, setSubjectForm] = useState<SubjectForm | null>(null);
+  const [subjectDelete, setSubjectDelete] = useState<{ subject: Subject; moveTo: string } | null>(null);
   const cache = useQueryClient();
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const subjects = data?.subjects || [];
@@ -908,6 +909,25 @@ function Notes({
       void cache.invalidateQueries({ queryKey: ["ai-messages"] });
     },
     onError: e => toast.error(errorDetail(e, da ? "Faget kunne ikke gemmes." : "Could not save the subject.")),
+  });
+  const deleteSubject = useMutation({
+    mutationFn: (d: { subject: Subject; moveTo: string }) => apiDelete(`/subjects/${d.subject.id}`, { move_to: d.moveTo }),
+    onSuccess: (_result, d) => {
+      const target = subjects.find(s => s.id === d.moveTo);
+      cache.setQueryData<Dashboard>(["dashboard"], current => current && ({
+        ...current, subjects: current.subjects.filter(s => s.id !== d.subject.id),
+      }));
+      if (target) {
+        setDraft(current => current && current.subject_key === d.subject.key
+          ? { ...current, subject: target.name, subject_key: target.key } : current);
+      }
+      setSubjectDelete(null);
+      setFilter("");
+      refresh();
+      void cache.invalidateQueries({ queryKey: ["ai-messages"] });
+      toast.success(da ? `Faget "${d.subject.name}" er slettet` : `Deleted the subject "${d.subject.name}"`);
+    },
+    onError: e => toast.error(errorDetail(e, da ? "Faget kunne ikke slettes." : "Could not delete the subject.")),
   });
   const subjectEditor = subjectForm && (
     <form className="space-y-2" onSubmit={e => {
@@ -1019,8 +1039,46 @@ function Notes({
                 }} className="flex gap-1 px-3 py-2 text-xs font-semibold text-blue-600" data-testid="subject-rename-button">
                   <Pencil className="size-3.5" /> {da ? "Omdøb fag" : "Rename subject"}
                 </button>}
+                {filter && subjects.length > 1 && !subjectDelete && <button onClick={() => {
+                  const subject = subjects.find(s => s.key === filter);
+                  const other = subjects.find(s => s.key !== filter);
+                  if (subject && other) setSubjectDelete({ subject, moveTo: other.id });
+                }} className="flex gap-1 px-3 py-2 text-xs font-semibold text-red-600" data-testid="subject-delete-button">
+                  <Trash2 className="size-3.5" /> {da ? "Slet fag" : "Delete subject"}
+                </button>}
               </>
             )}
+            {subjectDelete && (() => {
+              const key = subjectDelete.subject.key;
+              const noteCount = (data?.notes || []).filter(n => n.subject_key === key).length;
+              const taskCount = (data?.tasks || []).filter(x => x.subject_key === key).length;
+              return (
+                <div className="space-y-2 rounded-xl border border-red-100 bg-red-50 p-3 text-xs text-red-700" role="alert" data-testid="subject-delete-confirm">
+                  <p className="font-semibold">
+                    {da ? `Slet faget "${subjectDelete.subject.name}"?` : `Delete the subject "${subjectDelete.subject.name}"?`}
+                  </p>
+                  {noteCount + taskCount > 0 && (
+                    <label className="block space-y-1">
+                      <span>
+                        {da
+                          ? `${noteCount} ${noteCount === 1 ? "note" : "noter"} og ${taskCount} ${taskCount === 1 ? "opgave" : "opgaver"} flyttes til:`
+                          : `${noteCount} ${noteCount === 1 ? "note" : "notes"} and ${taskCount} ${taskCount === 1 ? "task" : "tasks"} move to:`}
+                      </span>
+                      <select value={subjectDelete.moveTo} onChange={e => setSubjectDelete({ ...subjectDelete, moveTo: e.target.value })}
+                        className="h-8 w-full rounded-lg border border-red-200 bg-white px-2 text-slate-900" data-testid="subject-delete-target">
+                        {subjects.filter(s => s.id !== subjectDelete.subject.id).map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+                      </select>
+                    </label>
+                  )}
+                  <div className="flex gap-1">
+                    <Button size="sm" type="button" variant="outline" className="bg-white" disabled={deleteSubject.isPending}
+                      onClick={() => setSubjectDelete(null)}>{t.cancel}</Button>
+                    <Button size="sm" type="button" className="bg-red-600 text-white hover:bg-red-700" disabled={deleteSubject.isPending}
+                      onClick={() => deleteSubject.mutate(subjectDelete)} data-testid="subject-delete-confirm-yes">{t.delete}</Button>
+                  </div>
+                </div>
+              );
+            })()}
           </CardContent>
         </Card>
         <div className="space-y-3" data-testid="note-list">

@@ -161,6 +161,7 @@ pub fn run() {
                 commands::export_backup,
                 commands::create_subject,
                 commands::rename_subject,
+                commands::delete_subject,
                 commands::create_note,
                 commands::update_note,
                 commands::delete_note,

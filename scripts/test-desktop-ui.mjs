@@ -69,6 +69,19 @@ async function run() {
   await click("subject-rename-button");
   await saveSubject("Literature");
   await until(() => byId("note-editor-panel")?.querySelector('[data-testid="subject-tag-literature"]'), "renamed subject on saved note");
+  // Delete an unused subject, then one still in use: its homework moves to the chosen subject.
+  const folders = () => [...document.querySelectorAll('[data-testid="subject-folder-item"]')];
+  const openFolder = async name => (await until(() => folders().find(b => b.textContent.startsWith(name)), "subject " + name)).click();
+  await openFolder("Robotics");
+  await click("subject-delete-button");
+  await click("subject-delete-confirm-yes");
+  await until(() => !folders().some(b => b.textContent.startsWith("Robotics")), "deleted unused subject");
+  await openFolder("Dansk");
+  await click("subject-delete-button");
+  const target = await control("subject-delete-target");
+  await fill("subject-delete-target", [...target.options].find(o => o.textContent === "Literature").value);
+  await click("subject-delete-confirm-yes");
+  await until(() => !folders().some(b => b.textContent.startsWith("Dansk")), "deleted subject in use");
   return { saveMs };
 }
 

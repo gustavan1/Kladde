@@ -251,6 +251,59 @@ fn rename_in_data(data: &mut crate::store::Data, id: &str, name: &str, lang: &Op
     Ok(subject.clone())
 }
 
+/// Deletes a subject. Its notes, homework, planner blocks and chat history move to `move_to`
+/// (another subject's id), which is only required while something still uses the subject.
+#[tauri::command]
+pub fn delete_subject(state: State<'_, AppState>, lang: Option<String>, id: String, body: Value) -> Res<Value> {
+    let mut guard = lock(&state);
+    let mut tx = guard.transaction();
+    let moved = delete_in_data(&mut tx.data, &id, body["move_to"].as_str(), &lang)?;
+    tx.commit()?;
+    Ok(json!({ "deleted": true, "moved": moved }))
+}
+
+fn delete_in_data(data: &mut crate::store::Data, id: &str, move_to: Option<&str>, lang: &Option<String>) -> Res<usize> {
+    let index = data.subjects.iter().position(|s| s.id == id).ok_or_else(|| not_found(lang))?;
+    if data.subjects.len() == 1 {
+        return Err(err(409, tr(lang, "Du skal have mindst ét fag.", "You need at least one subject.")));
+    }
+    let old = data.subjects[index].clone();
+    let uses = |subject: &str, key: &str| key == old.key || subject == old.name;
+    let in_use = data.notes.iter().filter(|n| uses(&n.subject, &n.subject_key)).count()
+        + data.tasks.iter().filter(|t| uses(&t.subject, &t.subject_key)).count()
+        + data.blocks.iter().filter(|b| b.subject == old.name).count()
+        + data.messages.iter().filter(|m| m.subject == old.name).count();
+    let target = match move_to.filter(|to| *to != id) {
+        Some(to) => Some(data.subjects.iter().find(|s| s.id == to).cloned().ok_or_else(|| not_found(lang))?),
+        None if in_use > 0 => {
+            return Err(err(400, tr(lang, "Vælg hvilket fag noterne og lektierne skal flyttes til.", "Choose which subject the notes and homework move to.")))
+        }
+        None => None,
+    };
+    if let Some(target) = &target {
+        for note in data.notes.iter_mut().filter(|n| uses(&n.subject, &n.subject_key)) {
+            note.subject.clone_from(&target.name);
+            note.subject_key.clone_from(&target.key);
+        }
+        for task in data.tasks.iter_mut().filter(|t| uses(&t.subject, &t.subject_key)) {
+            task.subject.clone_from(&target.name);
+            task.subject_key.clone_from(&target.key);
+        }
+        for block in data.blocks.iter_mut().filter(|b| b.subject == old.name) {
+            block.subject.clone_from(&target.name);
+            // Study-plan blocks keep their own colour; other blocks follow their subject.
+            if block.source.as_deref() != Some("plan") {
+                block.color.clone_from(&target.color);
+            }
+        }
+        for msg in data.messages.iter_mut().filter(|m| m.subject == old.name) {
+            msg.subject.clone_from(&target.name);
+        }
+    }
+    data.subjects.remove(index);
+    Ok(in_use)
+}
+
 // ---------- Notes ----------
 
 #[derive(Default)]
@@ -878,6 +931,41 @@ mod tests {
         assert_eq!(renamed.id, original.id);
         assert_eq!((&d.notes[0].subject_key, &d.tasks[0].subject_key), (&renamed.key, &renamed.key));
         assert_eq!((&d.blocks[0].subject, &d.messages[0].subject), (&renamed.name, &renamed.name));
+    }
+
+    #[test]
+    fn deleting_a_subject_moves_its_records_and_keeps_one_subject() {
+        use crate::store::{ChatMessage, Data};
+        let mut d = Data::default();
+        let (old, target) = (d.subjects[0].clone(), d.subjects[1].clone());
+        d.notes.push(Note { subject: old.name.clone(), subject_key: old.key.clone(), ..Default::default() });
+        d.tasks.push(Task { subject: old.name.clone(), subject_key: old.key.clone(), ..Default::default() });
+        d.blocks.push(Block { subject: old.name.clone(), color: old.color.clone(), source: Some("manual".into()), ..Default::default() });
+        d.blocks.push(Block { subject: old.name.clone(), color: "sky".into(), source: Some("plan".into()), ..Default::default() });
+        d.messages.push(ChatMessage { subject: old.name.clone(), ..Default::default() });
+        let before = d.clone();
+        // While the subject is in use, a different destination is required and nothing changes without one.
+        assert_eq!(delete_in_data(&mut d, &old.id, None, &None).unwrap_err().status, 400);
+        assert_eq!(delete_in_data(&mut d, &old.id, Some(&old.id), &None).unwrap_err().status, 400);
+        assert_eq!(delete_in_data(&mut d, &old.id, Some("missing"), &None).unwrap_err().status, 404);
+        assert_eq!(d, before);
+        assert_eq!(delete_in_data(&mut d, &old.id, Some(&target.id), &None).unwrap(), 5);
+        assert!(d.subjects.iter().all(|s| s.id != old.id));
+        assert_eq!((&d.notes[0].subject, &d.notes[0].subject_key), (&target.name, &target.key));
+        assert_eq!((&d.tasks[0].subject, &d.tasks[0].subject_key), (&target.name, &target.key));
+        assert_eq!((&d.blocks[0].subject, &d.blocks[0].color), (&target.name, &target.color));
+        assert_eq!((&d.blocks[1].subject, d.blocks[1].color.as_str()), (&target.name, "sky"));
+        assert_eq!(d.messages[0].subject, target.name);
+        // An unused subject goes without a destination, but the last subject stays.
+        let unused = d.subjects[2].id.clone();
+        assert_eq!(delete_in_data(&mut d, &unused, None, &None).unwrap(), 0);
+        while d.subjects.len() > 1 {
+            let (id, to) = (d.subjects[0].id.clone(), d.subjects[1].id.clone());
+            delete_in_data(&mut d, &id, Some(&to), &None).unwrap();
+        }
+        let last = d.subjects[0].id.clone();
+        assert_eq!(delete_in_data(&mut d, &last, None, &None).unwrap_err().status, 409);
+        assert_eq!(d.notes[0].subject_key, d.subjects[0].key);
     }
 
     #[test]
