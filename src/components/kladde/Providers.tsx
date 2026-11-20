@@ -58,6 +58,7 @@ export function AiSetup({ lang }: { lang: Language }) {
       if (action === "forget") return apiDelete<Status>("/ai/key");
       return apiPost<Status>("/ai/codex", { action, model });
     },
+    meta: { errorShownInline: true },
     onSuccess: (result, { action }) => {
       qc.setQueryData(["ai-status"], result);
       if (result.models) setModels(result.models);
@@ -308,6 +309,7 @@ export function ClaudePanel({ lang }: { lang: Language }) {
   const update = useMutation({
     mutationFn: (args: { action: string; id?: string; kind?: string }) =>
       apiPost<Inbox>("/claude", args),
+    meta: { errorShownInline: true },
     onSuccess: (result, args) => {
       qc.setQueryData(["claude-inbox"], result);
       if (args.action === "install")

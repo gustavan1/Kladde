@@ -48,8 +48,9 @@ fn re(pattern: &str) -> Regex {
     Regex::new(pattern).expect("valid regex")
 }
 
+// "due" only as a whole word: inside Danish words such as "Individuel vejledning" it is not a deadline.
 static DEADLINE_WORDS: LazyLock<Regex> =
-    LazyLock::new(|| re(r"(?i)aflever|opgave|deadline|frist|eksamen|prøve|test|hand.?in|assignment|due"));
+    LazyLock::new(|| re(r"(?i)aflever|opgave|deadline|frist|eksamen|prøve|test|hand.?in|assignment|\bdue\b"));
 static TIME_RE: LazyLock<Regex> = LazyLock::new(|| re(r"([0-9]{1,2})[:.]([0-9]{2})"));
 static ISO_DATE: LazyLock<Regex> = LazyLock::new(|| re(r"([0-9]{4})-([0-9]{1,2})-([0-9]{1,2})"));
 static DMY_DATE: LazyLock<Regex> = LazyLock::new(|| re(r"([0-9]{1,2})[/.\-]([0-9]{1,2})[/.\-]([0-9]{2,4})"));
@@ -876,6 +877,16 @@ mod tests {
         assert_eq!(events[0].time.as_deref(), Some(copenhagen_time(8, 15).as_str()));
         assert_eq!(events[0].end_time.as_deref(), Some(copenhagen_time(9, 45).as_str()));
         assert_eq!(events[1].time.as_deref(), Some("10:00"), "unknown zone = local time, as before");
+    }
+
+    #[test]
+    fn danish_words_containing_due_stay_lessons() {
+        let ics = "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:v\r\nSUMMARY:Individuel vejledning\r\nDTSTART:20261123T081500\r\nEND:VEVENT\r\nBEGIN:VEVENT\r\nUID:e\r\nSUMMARY:Essay due\r\nDTSTART:20261124T120000\r\nEND:VEVENT\r\nEND:VCALENDAR";
+        let events = parse_ics(ics, chrono::NaiveDate::from_ymd_opt(2026, 11, 18).unwrap()).unwrap();
+        let kinds: Vec<(&str, bool)> = events.iter().map(|e| (e.summary.as_str(), is_deadline_event(e))).collect();
+        assert_eq!(kinds, [("Individuel vejledning", false), ("Essay due", true)]);
+        let p = parse_import("ludus", "Aktivitet;Dato;Start\nIndividuel vejledning;2026-11-23;08:15", true).unwrap();
+        assert_eq!(p.items[0].kind, "lesson");
     }
 
     fn copenhagen_time(hour: u32, minute: u32) -> String {

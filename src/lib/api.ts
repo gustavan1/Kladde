@@ -25,7 +25,7 @@ export const errorDetail = (e: unknown, fallback: string) =>
     ? e.body.detail
     : fallback;
 
-const currentLang = () => {
+export const currentLang = () => {
   try {
     return localStorage.getItem("kladde-language") || "da";
   } catch {
