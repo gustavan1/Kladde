@@ -10,6 +10,17 @@
           }
         ]
       }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node --no-warnings \"$CLAUDE_PROJECT_DIR/.claude/hooks/claude-mem-export.mjs\"",
+            "timeout": 30
+          }
+        ]
+      }
     ]
   }
 }

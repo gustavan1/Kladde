@@ -10,6 +10,19 @@ without paying for cloud sync, a SessionStart hook
 `.md` file here (up to 64 KB each) as a searchable memory in the `Kladde`
 project, and re-imports a file when it changes.
 
+## Automatic notes (`auto/`)
+
+claude-mem records observations on its own during every session, but they
+live in its database and are lost with the container. A Stop hook
+(`.claude/hooks/claude-mem-export.mjs`) runs after every reply and writes the
+current session's observations and summaries to
+`auto/<date>-<session>.md` (split into `-partN` files above 60 KB). Simple
+secret patterns (tokens, keys, private keys, e-mail addresses) are redacted
+first. Commit these files with the session's work.
+
+They are claude-mem's unreviewed notes and can contain wrong guesses. The
+hand-written notes below take precedence.
+
 ## Keeping it up to date
 
 At the end of a session that changed something worth remembering:
