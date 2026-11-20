@@ -73,6 +73,38 @@ fn resolve_public(name: &str, deadline: Instant) -> std::io::Result<Vec<SocketAd
     Ok(addrs)
 }
 
+/// Name lookup for calendar downloads: ureq connects only to the addresses `resolve_public`
+/// vetted. Lookup failures and blocked destinations both read as "server not found".
+#[derive(Debug)]
+struct PublicResolver {
+    deadline: Instant,
+}
+
+impl ureq::unversioned::resolver::Resolver for PublicResolver {
+    fn resolve(
+        &self,
+        uri: &ureq::http::Uri,
+        _config: &ureq::config::Config,
+        _timeout: ureq::unversioned::transport::NextTimeout,
+    ) -> Result<ureq::unversioned::resolver::ResolvedSocketAddrs, ureq::Error> {
+        let name = uri
+            .scheme()
+            .zip(uri.authority())
+            .and_then(|(scheme, authority)| ureq::unversioned::resolver::DefaultResolver::host_and_port(scheme, authority))
+            .ok_or(ureq::Error::HostNotFound)?;
+        let addrs = resolve_public(&name, self.deadline).map_err(|e| match e.kind() {
+            std::io::ErrorKind::TimedOut => ureq::Error::Timeout(ureq::Timeout::Resolve),
+            _ => ureq::Error::HostNotFound,
+        })?;
+        let mut out = self.empty();
+        // ureq keeps at most 16 addresses per host.
+        for addr in addrs.into_iter().take(16) {
+            out.push(addr);
+        }
+        Ok(out)
+    }
+}
+
 /// The feed as the frontend sees it: the full link (which may contain a private token) is
 /// replaced by just its host name.
 pub fn feed_out(feed: &CalendarFeed) -> Value {
@@ -89,63 +121,58 @@ pub fn feed_out(feed: &CalendarFeed) -> Value {
     v
 }
 
-fn timed_out(err: &(dyn std::error::Error + 'static)) -> bool {
-    let mut cur: Option<&(dyn std::error::Error + 'static)> = Some(err);
-    while let Some(e) = cur {
-        if let Some(io) = e.downcast_ref::<std::io::Error>() {
-            if matches!(io.kind(), std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock) {
-                return true;
-            }
-        }
-        cur = e.source();
+fn timed_out(err: &ureq::Error) -> bool {
+    match err {
+        ureq::Error::Timeout(_) => true,
+        ureq::Error::Io(io) => matches!(io.kind(), std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock),
+        _ => false,
     }
-    false
 }
 
 /// Downloads a calendar. Error messages never contain the link itself, because calendar links
 /// often include a private token.
 pub(crate) fn fetch_calendar(url: &str, da: bool) -> Result<String, String> {
-    use std::io::Read;
     let timeout_msg = || if da { "Kalenderen svarede ikke i tide." } else { "The calendar did not answer in time." }.to_string();
     let deadline = Instant::now() + Duration::from_secs(20);
     let mut current = normalize_url(url)?;
-    let agent = ureq::AgentBuilder::new()
+    let config = ureq::Agent::config_builder()
         .https_only(true)
-        .try_proxy_from_env(false)
-        .resolver(move |name: &str| resolve_public(name, deadline))
-        .timeout(Duration::from_secs(20))
-        .redirects(0)
+        .proxy(None)
+        .timeout_global(Some(Duration::from_secs(20)))
+        .max_redirects(0)
         .user_agent("Kladde calendar sync")
         .build();
+    let agent = ureq::Agent::with_parts(config, ureq::unversioned::transport::DefaultConnector::new(), PublicResolver { deadline });
     let mut hops = 0;
-    let resp = loop {
+    let mut resp = loop {
         let timeout = deadline.checked_duration_since(Instant::now()).ok_or_else(timeout_msg)?;
-        match agent.get(&current).timeout(timeout).call() {
-        Ok(resp) if (300..400).contains(&resp.status()) => {
+        match agent.get(current.as_str()).config().timeout_global(Some(timeout)).build().call() {
+        Ok(resp) if (300..400).contains(&resp.status().as_u16()) => {
             hops += 1;
             if hops > 5 { return Err("Too many calendar redirects".into()); }
-            let next = resp.header("Location").and_then(|location| url::Url::parse(&current).ok()?.join(location).ok())
+            let next = resp.headers().get("location").and_then(|location| location.to_str().ok())
+                .and_then(|location| url::Url::parse(&current).ok()?.join(location).ok())
                 .ok_or("Invalid calendar redirect")?;
             current = normalize_url(next.as_str())?;
         }
         Ok(resp) => break resp,
-        Err(ureq::Error::Status(code, _)) => {
+        Err(ureq::Error::StatusCode(code)) => {
             return Err(if da { format!("Serveren svarede {code}.") } else { format!("The server answered {code}.") })
         }
-        Err(ureq::Error::Transport(t)) => {
-            if timed_out(&t) {
+        Err(e) => {
+            if timed_out(&e) {
                 return Err(timeout_msg());
             }
-            use ureq::ErrorKind::*;
-            let reason = match (t.kind(), da) {
-                (Dns, true) => "serveren blev ikke fundet",
-                (Dns, false) => "the server was not found",
+            use ureq::Error::*;
+            let reason = match (e, da) {
+                (HostNotFound, true) => "serveren blev ikke fundet",
+                (HostNotFound, false) => "the server was not found",
                 (ConnectionFailed, true) => "ingen forbindelse til serveren",
                 (ConnectionFailed, false) => "could not connect to the server",
-                (TooManyRedirects, true) => "for mange omdirigeringer",
-                (TooManyRedirects, false) => "too many redirects",
-                (InvalidUrl | UnknownScheme, true) => "ugyldigt link",
-                (InvalidUrl | UnknownScheme, false) => "invalid link",
+                (TooManyRedirects | RedirectFailed, true) => "for mange omdirigeringer",
+                (TooManyRedirects | RedirectFailed, false) => "too many redirects",
+                (BadUri(_) | RequireHttpsOnly(_), true) => "ugyldigt link",
+                (BadUri(_) | RequireHttpsOnly(_), false) => "invalid link",
                 (_, true) => "netværksfejl",
                 (_, false) => "network error",
             };
@@ -157,11 +184,10 @@ pub(crate) fn fetch_calendar(url: &str, da: bool) -> Result<String, String> {
         }
         }
     };
-    let mut text = String::new();
-    match resp.into_reader().take(MAX_CALENDAR_BYTES as u64 + 1).read_to_string(&mut text) {
-        Ok(n) if n > MAX_CALENDAR_BYTES => Err("Calendar exceeds the size limit".into()),
-        Ok(_) => Ok(text),
-        Err(e) if matches!(e.kind(), std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock) => Err(timeout_msg()),
+    match resp.body_mut().with_config().limit(MAX_CALENDAR_BYTES as u64).read_to_string() {
+        Ok(text) => Ok(text),
+        Err(ureq::Error::BodyExceedsLimit(_)) => Err("Calendar exceeds the size limit".into()),
+        Err(e) if timed_out(&e) => Err(timeout_msg()),
         Err(_) => Err(if da {
             "Kalenderen kunne ikke læses (afbrudt eller ikke tekst).".into()
         } else {
@@ -524,6 +550,14 @@ mod tests {
         apply_sync(&mut d, "f1", Ok("begin:vcalendar\nend:vcalendar\n".into()), false, &now).unwrap();
         assert_eq!(d.feeds[0].last_status, "ok");
         assert!(d.blocks.iter().all(|b| b.source.as_deref() != Some("feed:f1")));
+    }
+
+    #[test]
+    fn downloads_never_reach_this_computer_or_the_home_network() {
+        // Also for addresses written as IP literals: the vetted resolver must be used for those too.
+        for url in ["https://127.0.0.1:9/cal.ics", "https://localhost:9/cal.ics", "https://[::1]:9/cal.ics", "https://192.168.1.1/cal.ics"] {
+            assert_eq!(fetch_calendar(url, false).unwrap_err(), "The calendar could not be fetched (the server was not found).", "{url}");
+        }
     }
 
     #[test]
