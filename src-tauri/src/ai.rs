@@ -142,39 +142,44 @@ fn cloudflare_at(
         chat.push(json!({"role":"system","content":format!("Return only a JSON object matching this schema: {schema}")}));
     }
     chat.extend(messages);
-    let response = ureq::AgentBuilder::new()
-        .redirects(0)
-        .timeout(Duration::from_secs(120))
-        .build()
+    let agent = ureq::Agent::new_with_config(
+        ureq::Agent::config_builder()
+            .max_redirects(0)
+            .proxy(None)
+            // Error responses are read below: Cloudflare explains quota errors in the body.
+            .http_status_as_error(false)
+            .timeout_global(Some(Duration::from_secs(120)))
+            .build(),
+    );
+    let mut response = agent
         .post(url)
-        .set("Authorization", &format!("Bearer {key}"))
+        .header("Authorization", format!("Bearer {key}"))
         .send_json(json!({"model":CF_MODEL,"messages":chat,"max_tokens":4096,"stream":false}))
-        .map_err(|e| match e {
-            ureq::Error::Status(code, response) => {
-                let body = response.into_json::<Value>().unwrap_or_default();
-                match body["errors"][0]["code"].as_u64() {
-                    Some(3036) => err(
-                        429,
-                        tr(
-                            lang,
-                            "Din gratis dagskvote er brugt. Prøv igen efter kl. 00.00 UTC.",
-                            "Your daily free allowance is used up. Try again after 00:00 UTC.",
-                        ),
-                    ),
-                    Some(3040) => err(
-                        429,
-                        tr(
-                            lang,
-                            "Cloudflare har travlt. Prøv igen om lidt.",
-                            "Cloudflare is temporarily at capacity. Try again shortly.",
-                        ),
-                    ),
-                    _ => cf_error(code, lang),
-                }
-            }
-            _ => cf_error(0, lang),
-        })?;
-    let body: Value = response.into_json().map_err(|_| cf_error(502, lang))?;
+        .map_err(|_| cf_error(0, lang))?;
+    let code = response.status().as_u16();
+    if code >= 400 {
+        let body = response.body_mut().read_json::<Value>().unwrap_or_default();
+        return Err(match body["errors"][0]["code"].as_u64() {
+            Some(3036) => err(
+                429,
+                tr(
+                    lang,
+                    "Din gratis dagskvote er brugt. Prøv igen efter kl. 00.00 UTC.",
+                    "Your daily free allowance is used up. Try again after 00:00 UTC.",
+                ),
+            ),
+            Some(3040) => err(
+                429,
+                tr(
+                    lang,
+                    "Cloudflare har travlt. Prøv igen om lidt.",
+                    "Cloudflare is temporarily at capacity. Try again shortly.",
+                ),
+            ),
+            _ => cf_error(code, lang),
+        });
+    }
+    let body: Value = response.body_mut().read_json().map_err(|_| cf_error(502, lang))?;
     body["choices"][0]["message"]["content"]
         .as_str()
         .map(str::trim)
