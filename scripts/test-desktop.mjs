@@ -12,19 +12,21 @@ import { createServer as viteServer } from "vite";
 const dir = await mkdtemp(join(tmpdir(), "kladde-desktop-"));
 let showTable = false;
 let pageRendered = false;
+let schoolPrototypeFrozen;
 let schoolClickedAt;
 let launchedAt;
 let reopening = false;
 const school = httpServer((req, res) => {
-  if (req.url === "/ready" && !pageRendered) {
+  if (req.url.startsWith("/ready?") && !pageRendered) {
     pageRendered = true;
+    schoolPrototypeFrozen = new URL(req.url, "http://fixture").searchParams.get("frozen");
     console.log("School click to rendered fixture (ms)", Math.round(performance.now() - schoolClickedAt));
   }
   if (req.url === "/mitnielsbrock.html") {
     res.setHeader("Content-Type", "text/html; charset=utf-8");
     res.end(`<!doctype html><title>Test school</title><h1>School login fixture</h1><main></main>
       <script>
-        requestAnimationFrame(() => fetch("/ready"));
+        requestAnimationFrame(() => fetch("/ready?frozen=" + Object.isFrozen(Object.prototype)));
         const poll = setInterval(async () => {
           if (await (await fetch("/table", {cache:"no-store"})).text() !== "yes") return;
           clearInterval(poll);
@@ -96,6 +98,8 @@ try {
   reopening = true;
   await launchAndTest();
   assert.ok(pageRendered, "The school webview must render its first page");
+  // A frozen Object.prototype breaks the Microsoft sign-in page Mit Niels Brock uses.
+  assert.equal(schoolPrototypeFrozen, "false", "School pages must not get Kladde's frozen Object.prototype");
   const saved = JSON.parse(await readFile(join(dir, "kladde.json"), "utf8"));
   assert.equal(saved.notes.length, 1);
   assert.equal(saved.notes[0].subject, "Literature");
@@ -103,6 +107,8 @@ try {
   assert.equal(saved.notes[0].content, "Keep this draft");
   assert.equal(saved.tasks.length, 1);
   assert.equal(saved.tasks[0].deadline_time, "19:15");
+  assert.equal(saved.tasks[0].subject, "Literature", "Homework moves to the chosen subject when its subject is deleted");
+  assert.ok(!saved.subjects.some(s => ["robotics", "dansk"].includes(s.key)), "Deleted subjects stay deleted");
   console.log("Desktop regression passed: school launch and preview, offline save, and subject editing across restart.");
 } finally {
   await vite.close();

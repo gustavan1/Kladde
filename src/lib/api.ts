@@ -46,6 +46,7 @@ const routes: Route[] = [
   ["GET", /^\/weekly-summary$/, "weekly_summary_cmd", noArgs],
   ["POST", /^\/subjects$/, "create_subject", withBody],
   ["PATCH", /^\/subjects\/([^/]+)$/, "rename_subject", withIdAndBody],
+  ["DELETE", /^\/subjects\/([^/]+)$/, "delete_subject", withIdAndBody],
   ["POST", /^\/notes$/, "create_note", withBody],
   ["PATCH", /^\/notes\/([^/]+)$/, "update_note", withIdAndBody],
   ["DELETE", /^\/notes\/([^/]+)$/, "delete_note", withId],
@@ -102,7 +103,7 @@ function request<T>(method: Method, path: string, body?: unknown): Promise<T> {
 export const apiGet = <T>(path: string) => request<T>("GET", path);
 export const apiPost = <T>(path: string, body?: unknown) => request<T>("POST", path, body ?? {});
 export const apiPatch = <T>(path: string, body?: unknown) => request<T>("PATCH", path, body ?? {});
-export const apiDelete = <T>(path: string) => request<T>("DELETE", path);
+export const apiDelete = <T>(path: string, body?: unknown) => request<T>("DELETE", path, body);
 
 /** Opens a Save dialog (starting in Documents) and writes a backup. Resolves to the saved path, or null if cancelled. */
 export const exportBackup = () => call<string | null>("export_backup", {});
