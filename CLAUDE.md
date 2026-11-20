@@ -4,6 +4,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Kladde is a Tauri 2 desktop study app (notes, homework, weekly study plan) for Danish upper-secondary students, shipped for Windows x64 and Apple Silicon Macs. The frontend is React 19 + Tailwind 4 + TanStack Query (`src/`). The backend is Rust (`src-tauri/src/`). The UI is bilingual Danish/English and defaults to Danish.
 
+## Memory between sessions
+
+Notes from earlier sessions are in `.claude/memory/`: session histories, decisions and pitfalls, and how the owner likes to work. A SessionStart hook (`.claude/hooks/claude-mem-memory.mjs`) makes claude-mem import them as searchable memory. Search them before relearning something. At the end of a session that changed something worth remembering, add or update a note there and commit it (see `.claude/memory/README.md`).
+
 ## Commands
 
 | Command | Purpose |
