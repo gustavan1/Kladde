@@ -1,0 +1,26 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/claude-mem-memory.mjs\"",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node --no-warnings \"$CLAUDE_PROJECT_DIR/.claude/hooks/claude-mem-export.mjs\"",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}
