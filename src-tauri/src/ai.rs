@@ -12,13 +12,88 @@ use crate::commands::{err, is_da, str_of, tr, ApiErr, AppState, Res};
 use crate::store::{add_days, is_valid_date, local_date, new_id, now_iso, ChatMessage, Data};
 
 const CF_MODEL: &str = "@cf/openai/gpt-oss-20b";
+const GEMINI_URL: &str = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions";
+const GEMINI_MODEL: &str = "gemini-flash-latest";
+const OPENROUTER_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
+const OPENROUTER_MODEL: &str = "nvidia/nemotron-3-ultra-550b-a55b:free";
+/// Gemini and OpenRouter are offered in the Mac edition only, like ChatGPT through Codex.
+const MAC: bool = cfg!(target_os = "macos");
+
+/// Hosted services reached with an API key and an OpenAI-style chat endpoint.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Hosted {
+    Cloudflare,
+    Gemini,
+    OpenRouter,
+}
+
+impl Hosted {
+    fn parse(name: &str) -> Option<Self> {
+        match name {
+            "cloudflare" => Some(Self::Cloudflare),
+            "gemini" if MAC => Some(Self::Gemini),
+            "openrouter" if MAC => Some(Self::OpenRouter),
+            _ => None,
+        }
+    }
+    fn name(self) -> &'static str {
+        match self {
+            Self::Cloudflare => "cloudflare",
+            Self::Gemini => "gemini",
+            Self::OpenRouter => "openrouter",
+        }
+    }
+    fn label(self) -> &'static str {
+        match self {
+            Self::Cloudflare => "Cloudflare",
+            Self::Gemini => "Google Gemini",
+            Self::OpenRouter => "OpenRouter",
+        }
+    }
+    /// Each service's key has its own keyring entry.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    fn keyring_service(self) -> &'static str {
+        match self {
+            Self::Cloudflare => "dk.kladde.app.cloudflare",
+            Self::Gemini => "dk.kladde.app.gemini",
+            Self::OpenRouter => "dk.kladde.app.openrouter",
+        }
+    }
+    fn default_model(self) -> &'static str {
+        match self {
+            Self::Cloudflare => CF_MODEL,
+            Self::Gemini => GEMINI_MODEL,
+            Self::OpenRouter => OPENROUTER_MODEL,
+        }
+    }
+    /// Output limit. Gemini counts its thinking in this limit, so it is left to the service.
+    fn max_tokens(self) -> Option<u32> {
+        match self {
+            Self::Cloudflare => Some(4096),
+            Self::Gemini => None,
+            Self::OpenRouter => Some(8192),
+        }
+    }
+}
+
+/// Keyring account for services with one key per computer (Cloudflare keys are stored per Account ID).
+const KEY_ACCOUNT: &str = "api-key";
 
 #[derive(Serialize, Deserialize, Clone, Default)]
 #[serde(default)]
 pub struct AiSettings {
     account: String,
+    /// Kept in step with `provider` so older versions still pick Cloudflare or Codex.
     use_codex: bool,
     codex_model: String,
+    /// "cloudflare", "codex", "gemini" or "openrouter". Empty in older files, where `use_codex` decides.
+    provider: String,
+    /// Set once a Gemini key is saved and tested.
+    gemini_model: String,
+    /// Set once an OpenRouter key is saved and tested.
+    openrouter_model: String,
+    #[serde(flatten)]
+    extra: serde_json::Map<String, Value>,
 }
 
 pub struct AiState {
@@ -60,32 +135,64 @@ impl AiState {
 }
 
 impl AiSettings {
+    /// The provider in use: "codex", "gemini" and "openrouter" only on macOS, otherwise "cloudflare".
+    fn active(&self) -> &'static str {
+        match self.provider.as_str() {
+            "codex" if MAC => "codex",
+            "gemini" if MAC => "gemini",
+            "openrouter" if MAC => "openrouter",
+            "" if MAC && self.use_codex => "codex",
+            _ => "cloudflare",
+        }
+    }
+    fn set_provider(&mut self, provider: &str) {
+        self.provider = provider.into();
+        self.use_codex = provider == "codex";
+    }
+    /// Model name for each hosted service; empty until it is set up.
+    fn hosted_model(&self, h: Hosted) -> &str {
+        match h {
+            Hosted::Cloudflare if self.account.is_empty() => "",
+            Hosted::Cloudflare => CF_MODEL,
+            Hosted::Gemini => &self.gemini_model,
+            Hosted::OpenRouter => &self.openrouter_model,
+        }
+    }
+    fn model(&self) -> &str {
+        match self.active() {
+            "codex" => &self.codex_model,
+            name => match Hosted::parse(name) {
+                Some(Hosted::Cloudflare) | None => CF_MODEL,
+                Some(h) => self.hosted_model(h),
+            },
+        }
+    }
     /// True when some AI provider is set up and can be used.
     pub(crate) fn is_configured(&self) -> bool {
-        if cfg!(target_os = "macos") && self.use_codex {
-            !self.codex_model.is_empty()
-        } else {
-            !self.account.is_empty()
+        match self.active() {
+            "codex" => !self.codex_model.is_empty(),
+            name => Hosted::parse(name).is_some_and(|h| !self.hosted_model(h).is_empty()),
         }
     }
 }
 
 fn status(s: &AiSettings) -> Value {
-    let codex = cfg!(target_os = "macos") && s.use_codex;
-    json!({"configured":if codex { !s.codex_model.is_empty() } else { !s.account.is_empty() },
-        "provider":if codex {"codex"} else {"cloudflare"}, "mac":cfg!(target_os="macos"), "codex_connected":!s.codex_model.is_empty(),
-        "model":if codex { &s.codex_model } else { CF_MODEL }, "account":s.account})
+    json!({"configured":s.is_configured(), "provider":s.active(), "mac":MAC, "codex_connected":!s.codex_model.is_empty(),
+        "model":s.model(), "account":s.account,
+        "gemini_model":s.gemini_model, "openrouter_model":s.openrouter_model,
+        "defaults":{"gemini":GEMINI_MODEL, "openrouter":OPENROUTER_MODEL}})
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-fn credential(account: &str) -> Res<keyring::Entry> {
-    keyring::Entry::new("dk.kladde.app.cloudflare", account)
+fn credential(h: Hosted, account: &str) -> Res<keyring::Entry> {
+    keyring::Entry::new(h.keyring_service(), account)
         .map_err(|e| err(500, format!("Credential store: {e}")))
 }
-fn token(account: &str, change: Option<&str>) -> Res<String> {
+/// Reads (None), saves (Some(key)) or deletes (Some("")) a service's key in the OS keyring.
+fn token(h: Hosted, account: &str, change: Option<&str>, lang: &Option<String>) -> Res<String> {
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     {
-        let entry = credential(account)?;
+        let entry = credential(h, account)?;
         let result = match change {
             Some("") => match entry.delete_credential() {
                 Ok(()) | Err(keyring::Error::NoEntry) => Ok(String::new()),
@@ -94,72 +201,97 @@ fn token(account: &str, change: Option<&str>) -> Res<String> {
             Some(value) => entry.set_password(value).map(|_| String::new()),
             None => entry.get_password(),
         };
-        result.map_err(|e| err(500, format!("Credential store: {e}")))
+        result.map_err(|e| match e {
+            keyring::Error::NoEntry => err(
+                428,
+                tr(
+                    lang,
+                    &format!("Indsæt din {}-nøgle i AI-indstillinger.", h.label()),
+                    &format!("Paste your {} key in AI settings.", h.label()),
+                ),
+            ),
+            e => err(500, format!("Credential store: {e}")),
+        })
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
-        let _ = (account, change);
+        let _ = (h, account, change, lang);
         Err(err(400, "Credential storage requires Windows or macOS."))
     }
 }
 
-fn cf_error(code: u16, lang: &Option<String>) -> ApiErr {
-    let (da, en) = match code {
-        401 | 403 => (
-            "Tjek dit Account ID og tokenets Workers AI-tilladelser.",
-            "Check your Account ID and your token’s Workers AI permissions.",
+/// A clear message for a failed request, in the words of the service that failed.
+fn provider_error(h: Hosted, code: u16, lang: &Option<String>) -> ApiErr {
+    let name = h.label();
+    let (da, en): (String, String) = match (h, code) {
+        (_, 0) => (
+            format!("Kunne ikke forbinde til {name}. Tjek internetforbindelsen."),
+            format!("Could not reach {name}. Check your connection."),
         ),
-        404 => (
-            "Account ID eller model blev ikke fundet.",
-            "Cloudflare could not find the account or model.",
+        (Hosted::Cloudflare, 401 | 403) => (
+            "Tjek dit Account ID og tokenets Workers AI-tilladelser.".into(),
+            "Check your Account ID and your token’s Workers AI permissions.".into(),
         ),
-        429 => (
-            "Cloudflares grænse er nået. Tjek dit forbrug i dashboardet.",
-            "Cloudflare’s quota or rate limit was reached. Check usage in your dashboard.",
+        (Hosted::Cloudflare, 404) => (
+            "Account ID eller model blev ikke fundet.".into(),
+            "Cloudflare could not find the account or model.".into(),
         ),
-        0 => (
-            "Kunne ikke forbinde til Cloudflare. Tjek internetforbindelsen.",
-            "Could not reach Cloudflare. Check your connection.",
+        (Hosted::Cloudflare, 429) => (
+            "Cloudflares grænse er nået. Tjek dit forbrug i dashboardet.".into(),
+            "Cloudflare’s quota or rate limit was reached. Check usage in your dashboard.".into(),
+        ),
+        (Hosted::Gemini, 401 | 403) => (
+            "Google afviste API-nøglen. Opret en ny nøgle i Google AI Studio, og indsæt den igen.".into(),
+            "Google rejected the API key. Create a new key in Google AI Studio and paste it again.".into(),
+        ),
+        (Hosted::Gemini, 404) => (
+            "Google kender ikke den model. Tjek modelnavnet, fx gemini-flash-latest.".into(),
+            "Google does not know that model. Check the model name, e.g. gemini-flash-latest.".into(),
+        ),
+        (Hosted::Gemini, 429) => (
+            "Geminis gratis grænse er nået. Vent et minut, eller prøv igen i morgen.".into(),
+            "Gemini’s free limit was reached. Wait a minute, or try again tomorrow.".into(),
+        ),
+        (Hosted::Gemini, 500..=599) => (
+            "Gemini har travlt lige nu. Prøv igen om lidt.".into(),
+            "Gemini is busy right now. Try again shortly.".into(),
+        ),
+        (Hosted::OpenRouter, 401) => (
+            "OpenRouter afviste API-nøglen. Opret en ny nøgle, og indsæt den igen.".into(),
+            "OpenRouter rejected the API key. Create a new key and paste it again.".into(),
+        ),
+        (Hosted::OpenRouter, 402) => (
+            "Din OpenRouter-konto har ikke kredit til denne model. Vælg en gratis model (der ender på :free), eller køb kredit.".into(),
+            "Your OpenRouter account has no credit for this model. Choose a free model (ending in :free) or add credit.".into(),
+        ),
+        (Hosted::OpenRouter, 403) => (
+            "OpenRouter afviste teksten.".into(),
+            "OpenRouter refused the text.".into(),
+        ),
+        (Hosted::OpenRouter, 404) => (
+            "OpenRouter kender ikke den model. Kopiér modellens ID fra openrouter.ai/models.".into(),
+            "OpenRouter does not know that model. Copy the model ID from openrouter.ai/models.".into(),
+        ),
+        (Hosted::OpenRouter, 429) => (
+            "OpenRouters grænse for gratis modeller er nået. Vent lidt, eller prøv igen i morgen.".into(),
+            "OpenRouter’s free model limit was reached. Wait a little, or try again tomorrow.".into(),
+        ),
+        (Hosted::OpenRouter, 408 | 500..=599) => (
+            "Modellen svarer ikke lige nu. Prøv igen om lidt, eller vælg en anden model.".into(),
+            "The model is not answering right now. Try again shortly or choose another model.".into(),
         ),
         _ => (
-            "Cloudflare kunne ikke behandle forespørgslen.",
-            "Cloudflare could not process the request.",
+            format!("{name} kunne ikke behandle forespørgslen."),
+            format!("{name} could not process the request."),
         ),
     };
-    err(if code == 0 { 503 } else { code }, tr(lang, da, en))
+    err(if code == 0 { 503 } else { code }, tr(lang, &da, &en))
 }
 
-fn cloudflare_at(
-    url: &str,
-    key: &str,
-    system: &str,
-    messages: Vec<Value>,
-    schema: Option<Value>,
-    lang: &Option<String>,
-) -> Res<String> {
-    let mut chat = vec![json!({"role":"system","content":system})];
-    if let Some(schema) = schema {
-        chat.push(json!({"role":"system","content":format!("Return only a JSON object matching this schema: {schema}")}));
-    }
-    chat.extend(messages);
-    let agent = ureq::Agent::new_with_config(
-        ureq::Agent::config_builder()
-            .max_redirects(0)
-            .proxy(None)
-            // Error responses are read below: Cloudflare explains quota errors in the body.
-            .http_status_as_error(false)
-            .timeout_global(Some(Duration::from_secs(120)))
-            .build(),
-    );
-    let mut response = agent
-        .post(url)
-        .header("Authorization", format!("Bearer {key}"))
-        .send_json(json!({"model":CF_MODEL,"messages":chat,"max_tokens":4096,"stream":false}))
-        .map_err(|_| cf_error(0, lang))?;
-    let code = response.status().as_u16();
-    if code >= 400 {
-        let body = response.body_mut().read_json::<Value>().unwrap_or_default();
-        return Err(match body["errors"][0]["code"].as_u64() {
+/// Reads the service's own explanation of an error response, where it has one.
+fn body_error(h: Hosted, code: u16, body: &Value, lang: &Option<String>) -> ApiErr {
+    match h {
+        Hosted::Cloudflare => match body["errors"][0]["code"].as_u64() {
             Some(3036) => err(
                 429,
                 tr(
@@ -176,20 +308,88 @@ fn cloudflare_at(
                     "Cloudflare is temporarily at capacity. Try again shortly.",
                 ),
             ),
-            _ => cf_error(code, lang),
-        });
+            _ => provider_error(h, code, lang),
+        },
+        Hosted::Gemini => {
+            // The OpenAI-compatible endpoint sometimes wraps the error in a list.
+            let error = if body.is_array() { &body[0]["error"] } else { &body["error"] };
+            let message = error["message"].as_str().unwrap_or("");
+            let code = if code == 400 && message.contains("API key") { 401 } else { code };
+            provider_error(h, code, lang)
+        }
+        Hosted::OpenRouter => provider_error(h, code, lang),
     }
-    let body: Value = response.body_mut().read_json().map_err(|_| cf_error(502, lang))?;
+}
+
+/// Sends one chat request to an OpenAI-style endpoint and returns the reply text.
+#[allow(clippy::too_many_arguments)]
+fn chat_at(
+    h: Hosted,
+    url: &str,
+    key: &str,
+    model: &str,
+    system: &str,
+    messages: Vec<Value>,
+    schema: Option<Value>,
+    lang: &Option<String>,
+) -> Res<String> {
+    let mut chat = vec![json!({"role":"system","content":system})];
+    if let Some(schema) = schema {
+        chat.push(json!({"role":"system","content":format!("Return only a JSON object matching this schema: {schema}")}));
+    }
+    chat.extend(messages);
+    let agent = ureq::Agent::new_with_config(
+        ureq::Agent::config_builder()
+            .max_redirects(0)
+            .proxy(None)
+            // Error responses are read below: the services explain quota errors in the body.
+            .http_status_as_error(false)
+            .timeout_global(Some(Duration::from_secs(120)))
+            .build(),
+    );
+    let mut request = json!({"model":model,"messages":chat,"stream":false});
+    if let Some(limit) = h.max_tokens() {
+        request["max_tokens"] = json!(limit);
+    }
+    let mut call = agent
+        .post(url)
+        .header("Authorization", format!("Bearer {key}"));
+    if h == Hosted::OpenRouter {
+        call = call.header("X-Title", "Kladde");
+    }
+    let mut response = call.send_json(request).map_err(|_| provider_error(h, 0, lang))?;
+    let code = response.status().as_u16();
+    if code >= 400 {
+        let body = response.body_mut().read_json::<Value>().unwrap_or_default();
+        return Err(body_error(h, code, &body, lang));
+    }
+    let body: Value = response
+        .body_mut()
+        .read_json()
+        .map_err(|_| provider_error(h, 502, lang))?;
+    // OpenRouter can report a failed model with status 200 and an error object.
+    if let Some(code) = body["error"]["code"].as_u64() {
+        return Err(provider_error(h, u16::try_from(code).unwrap_or(502), lang));
+    }
     body["choices"][0]["message"]["content"]
         .as_str()
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(String::from)
-        .ok_or_else(|| cf_error(502, lang))
+        .ok_or_else(|| provider_error(h, 502, lang))
 }
 
 fn cf_url(account: &str) -> String {
     format!("https://api.cloudflare.com/client/v4/accounts/{account}/ai/v1/chat/completions")
+}
+
+/// The endpoint URL and keyring account of a hosted service.
+fn endpoint(h: Hosted, cf_account: &str) -> (String, String) {
+    match h {
+        Hosted::Cloudflare => (cf_url(cf_account), cf_account.to_owned()),
+        Hosted::Gemini => (GEMINI_URL.into(), KEY_ACCOUNT.into()),
+        Hosted::OpenRouter => (OPENROUTER_URL.into(), KEY_ACCOUNT.into()),
+    }
 }
 
 pub(crate) fn generate(
@@ -200,28 +400,44 @@ pub(crate) fn generate(
     schema: Option<Value>,
     lang: &Option<String>,
 ) -> Res<String> {
-    if s.use_codex && cfg!(target_os = "macos") {
-        return crate::codex_client::answer(app, &s.codex_model, system, messages, schema)
-            .map_err(Into::into);
-    }
-    if s.account.is_empty() {
+    let h = match s.active() {
+        "codex" => {
+            return crate::codex_client::answer(app, &s.codex_model, system, messages, schema)
+                .map_err(Into::into)
+        }
+        name => Hosted::parse(name).unwrap_or(Hosted::Cloudflare),
+    };
+    let model = s.hosted_model(h);
+    if model.is_empty() {
         return Err(err(
             428,
             tr(
                 lang,
-                "Opsæt Cloudflare i AI-indstillinger.",
-                "Set up Cloudflare in AI settings.",
+                &format!("Opsæt {} i AI-indstillinger.", h.label()),
+                &format!("Set up {} in AI settings.", h.label()),
             ),
         ));
     }
-    cloudflare_at(
-        &cf_url(&s.account),
-        &token(&s.account, None)?,
+    let (url, account) = endpoint(h, &s.account);
+    chat_at(
+        h,
+        &url,
+        &token(h, &account, None, lang)?,
+        model,
         system,
         messages,
         schema,
         lang,
     )
+}
+
+/// A model ID as the services write them, e.g. "nvidia/nemotron-3-ultra-550b-a55b:free".
+fn valid_model(model: &str) -> bool {
+    !model.is_empty()
+        && model.len() <= 120
+        && model
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"-._:/@".contains(&b))
 }
 
 async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Res<T> + Send + 'static) -> Res<T> {
@@ -234,76 +450,135 @@ pub fn ai_status(app: AppHandle) -> Res<Value> {
     Ok(status(&app.state::<AiState>().get()))
 }
 
+/// Tests a key (or the saved one) with a tiny request, then saves it and switches to that service.
+/// `provider` is "cloudflare" (the default, with `account`), or on macOS "gemini" or "openrouter" (with `model`).
 #[tauri::command]
 pub async fn ai_save_key(app: AppHandle, body: Value, lang: Option<String>) -> Res<Value> {
-    let account = body["account"].as_str().unwrap_or("").trim().to_owned();
-    let key = body["key"].as_str().unwrap_or("").trim().to_owned();
-    if account.len() != 32 || !account.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err(err(
+    let h = Hosted::parse(body["provider"].as_str().unwrap_or("cloudflare")).ok_or_else(|| {
+        err(
             400,
             tr(
                 &lang,
-                "Account ID skal være 32 hexadecimale tegn.",
-                "Account ID must contain 32 hexadecimal characters.",
+                "Den tjeneste findes kun i Mac-udgaven.",
+                "That service is available in the Mac edition only.",
             ),
-        ));
-    }
+        )
+    })?;
+    let key = body["key"].as_str().unwrap_or("").trim().to_owned();
+    let (account, model) = if h == Hosted::Cloudflare {
+        let account = body["account"].as_str().unwrap_or("").trim().to_owned();
+        if account.len() != 32 || !account.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(err(
+                400,
+                tr(
+                    &lang,
+                    "Account ID skal være 32 hexadecimale tegn.",
+                    "Account ID must contain 32 hexadecimal characters.",
+                ),
+            ));
+        }
+        (account, CF_MODEL.to_owned())
+    } else {
+        let model = match body["model"].as_str().unwrap_or("").trim() {
+            "" => h.default_model(),
+            m => m,
+        };
+        if !valid_model(model) {
+            return Err(err(
+                400,
+                tr(
+                    &lang,
+                    "Modelnavnet må kun indeholde bogstaver, tal og - . _ : / @",
+                    "The model name may only contain letters, digits and - . _ : / @",
+                ),
+            ));
+        }
+        (KEY_ACCOUNT.to_owned(), model.to_owned())
+    };
     blocking(move || {
         let key = if key.is_empty() {
-            token(&account, None)?
+            token(h, &account, None, &lang)?
         } else {
             key
         };
-        cloudflare_at(
-            &cf_url(&account),
+        let (url, _) = endpoint(h, &account);
+        chat_at(
+            h,
+            &url,
             &key,
+            &model,
             "Reply briefly.",
             vec![json!({"role":"user","content":"Say OK."})],
             None,
             &lang,
         )?;
-        token(&account, Some(&key))?;
+        token(h, &account, Some(&key), &lang)?;
         let state = app.state::<AiState>();
         let old = state.get().account;
         let status = state.update(|s| {
-            s.account = account.clone();
-            s.use_codex = false;
+            match h {
+                Hosted::Cloudflare => s.account = account.clone(),
+                Hosted::Gemini => s.gemini_model = model,
+                Hosted::OpenRouter => s.openrouter_model = model,
+            }
+            s.set_provider(h.name());
         })?;
-        if !old.is_empty() && old != account {
-            token(&old, Some(""))?;
+        if h == Hosted::Cloudflare && !old.is_empty() && old != account {
+            token(h, &old, Some(""), &lang)?;
         }
         Ok(status)
     })
     .await
 }
 
+/// Removes a service's saved key. `provider` defaults to "cloudflare".
 #[tauri::command]
-pub async fn ai_forget_key(app: AppHandle) -> Res<Value> {
+pub async fn ai_forget_key(app: AppHandle, body: Option<Value>, lang: Option<String>) -> Res<Value> {
+    let name = body
+        .as_ref()
+        .and_then(|b| b["provider"].as_str())
+        .unwrap_or("cloudflare")
+        .to_owned();
+    let h = Hosted::parse(&name).ok_or_else(|| err(400, "Unknown provider"))?;
     blocking(move || {
         let state = app.state::<AiState>();
-        let account = state.get().account;
+        let account = match h {
+            Hosted::Cloudflare => state.get().account,
+            _ => KEY_ACCOUNT.to_owned(),
+        };
         if !account.is_empty() {
-            token(&account, Some(""))?;
+            token(h, &account, Some(""), &lang)?;
         }
-        state.update(|s| s.account.clear())
+        state.update(|s| {
+            match h {
+                Hosted::Cloudflare => s.account.clear(),
+                Hosted::Gemini => s.gemini_model.clear(),
+                Hosted::OpenRouter => s.openrouter_model.clear(),
+            }
+            if h != Hosted::Cloudflare && s.active() == h.name() {
+                s.set_provider("cloudflare");
+            }
+        })
     })
     .await
 }
 
 #[tauri::command]
 pub async fn ai_codex(app: AppHandle, body: Value) -> Res<Value> {
-    if !cfg!(target_os = "macos") {
+    if !MAC {
         return Err(err(400, "Codex is available in the Mac edition."));
     }
     blocking(move || {
         let state = app.state::<AiState>();
         match body["action"].as_str() {
-            Some("cloudflare") => state.update(|s| s.use_codex = false),
+            Some("cloudflare") => state.update(|s| s.set_provider("cloudflare")),
             Some("logout") => {
                 crate::codex_client::logout(&app)?;
                 state.update(|s| {
                     s.codex_model.clear();
-                    s.use_codex = false;
+                    if s.active() == "codex" {
+                        s.set_provider("cloudflare");
+                    }
                 })
             }
             Some(action @ ("connect" | "models" | "select")) => {
@@ -319,7 +594,7 @@ pub async fn ai_codex(app: AppHandle, body: Value) -> Res<Value> {
                     models.iter().find(|m| **m == current).unwrap_or(&models[0])
                 };
                 let mut out = state.update(|s| {
-                    s.use_codex = true;
+                    s.set_provider("codex");
                     s.codex_model = model.clone();
                 })?;
                 out["models"] = json!(models);
@@ -636,7 +911,7 @@ pub async fn ai_chat(app: AppHandle, lang: Option<String>, body: Value) -> Res<C
             ),
         ));
     }
-    let provider = if s.use_codex { "codex" } else { "cloudflare" };
+    let provider = s.active();
     let (generation, system, contents) = {
         let state = app.state::<AppState>();
         let store = state.store.lock().unwrap_or_else(|p| p.into_inner());
@@ -700,11 +975,16 @@ mod tests {
 
     #[test]
     fn cloudflare_setup_errors_distinguish_quota_and_credentials() {
-        assert_eq!(cf_error(429, &None).status, 429);
-        assert!(cf_error(403, &Some("en".into()))
+        let cf = Hosted::Cloudflare;
+        assert_eq!(provider_error(cf, 429, &None).status, 429);
+        assert!(provider_error(cf, 403, &Some("en".into()))
             .detail
             .contains("permissions"));
-        assert_eq!(cf_error(0, &None).status, 503);
+        assert_eq!(provider_error(cf, 0, &None).status, 503);
+        assert!(provider_error(Hosted::Gemini, 0, &Some("en".into())).detail.contains("Google Gemini"));
+        assert!(provider_error(Hosted::OpenRouter, 402, &Some("en".into())).detail.contains(":free"));
+        let gemini_bad_key = json!([{"error":{"code":400,"message":"API key not valid. Please pass a valid API key."}}]);
+        assert_eq!(body_error(Hosted::Gemini, 400, &gemini_bad_key, &None).status, 401);
     }
 
     #[test]
@@ -754,9 +1034,11 @@ mod tests {
             .unwrap();
         });
         assert_eq!(
-            cloudflare_at(
+            chat_at(
+                Hosted::Cloudflare,
                 &url,
                 "test-token",
+                CF_MODEL,
                 "Reply briefly.",
                 vec![json!({"role":"user","content":"Say OK."})],
                 None,
@@ -839,6 +1121,101 @@ mod tests {
         let again = AiState::load(path);
         assert_eq!(again.get().account, "a".repeat(32));
         assert_eq!(status(&again.get())["provider"], "cloudflare");
+    }
+
+    #[test]
+    fn provider_choice_survives_and_keeps_old_versions_working() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        // A file from an older version: no provider field, an unknown field from elsewhere.
+        std::fs::write(&path, r#"{"account":"","use_codex":true,"codex_model":"gpt-5","future":1}"#).unwrap();
+        let state = AiState::load(path.clone());
+        assert_eq!(state.get().active(), if MAC { "codex" } else { "cloudflare" });
+        state
+            .update(|s| {
+                s.openrouter_model = OPENROUTER_MODEL.into();
+                s.set_provider("openrouter");
+            })
+            .unwrap();
+        let saved: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved["future"], 1);
+        assert_eq!(saved["use_codex"], false);
+        let again = AiState::load(path).get();
+        if MAC {
+            assert_eq!(again.active(), "openrouter");
+            assert_eq!(again.model(), OPENROUTER_MODEL);
+            assert!(again.is_configured());
+        } else {
+            // Gemini and OpenRouter are Mac only; elsewhere the choice falls back to Cloudflare.
+            assert_eq!(again.active(), "cloudflare");
+            assert!(!again.is_configured());
+            assert!(Hosted::parse("gemini").is_none());
+        }
+    }
+
+    #[test]
+    fn model_ids_are_checked() {
+        assert!(valid_model("nvidia/nemotron-3-ultra-550b-a55b:free"));
+        assert!(valid_model("gemini-flash-latest"));
+        assert!(!valid_model(""));
+        assert!(!valid_model("a b"));
+        assert!(!valid_model("x\n"));
+    }
+
+    #[test]
+    fn openrouter_transport_sends_model_title_and_token_limit() {
+        use std::io::{BufRead, BufReader, Read, Write};
+        let socket = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/api/v1/chat/completions", socket.local_addr().unwrap());
+        let handler = std::thread::spawn(move || {
+            let (mut stream, _) = socket.accept().unwrap();
+            let mut reader = BufReader::new(&stream);
+            let mut headers = String::new();
+            loop {
+                let mut line = String::new();
+                assert_ne!(reader.read_line(&mut line).unwrap(), 0);
+                if line.trim().is_empty() {
+                    break;
+                }
+                headers.push_str(&line.to_lowercase());
+            }
+            assert!(headers.contains("authorization: bearer or-key"));
+            assert!(headers.contains("x-title: kladde"));
+            let len = headers
+                .lines()
+                .find_map(|line| line.strip_prefix("content-length: "))
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap();
+            let mut body = vec![0; len];
+            reader.read_exact(&mut body).unwrap();
+            let body: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(body["model"], OPENROUTER_MODEL);
+            assert_eq!(body["max_tokens"], 8192);
+            let reply = r#"{"error":{"code":402,"message":"Insufficient credits"}}"#;
+            write!(
+                stream,
+                "HTTP/1.1 402 Payment Required\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                reply.len(),
+                reply
+            )
+            .unwrap();
+        });
+        let e = chat_at(
+            Hosted::OpenRouter,
+            &url,
+            "or-key",
+            OPENROUTER_MODEL,
+            "Reply briefly.",
+            vec![json!({"role":"user","content":"Say OK."})],
+            None,
+            &Some("en".into()),
+        )
+        .unwrap_err();
+        assert_eq!(e.status, 402);
+        assert!(e.detail.contains("credit"));
+        handler.join().unwrap();
     }
     #[test]
     fn pending_chat_turn_cannot_restore_cleared_history_on_disk() {

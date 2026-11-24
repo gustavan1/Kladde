@@ -47,6 +47,15 @@ Lessons from earlier sessions. Each one cost real time to find.
 - **AI:** Cloudflare Workers AI (`@cf/openai/gpt-oss-20b`) on both platforms,
   with the token in the OS keyring. On Mac, ChatGPT runs through the bundled
   Codex app server. Gemini was the first choice and was dropped.
+- **AI on Mac also offers Google Gemini and OpenRouter** (owner asked for
+  them in the Mac edition only, 2026-11-24). Both use the shared
+  OpenAI-style `chat_at` in `ai.rs`. `AiSettings.provider` picks the service
+  (`use_codex` is kept in step so older versions still work), each key has its
+  own keyring service (`dk.kladde.app.gemini` / `.openrouter`, account
+  `api-key`), and `gemini_model` / `openrouter_model` are set only once a key
+  has been tested. Defaults: `gemini-flash-latest` and
+  `nvidia/nemotron-3-ultra-550b-a55b:free`. Gemini gets no `max_tokens`
+  because its thinking counts toward the limit.
 - **School window:** private, with no capabilities. Pages are read only on the
   two school sites, and nothing is saved before the student confirms. The AI
   reads a page only after a click and a confirmation.

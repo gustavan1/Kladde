@@ -18,7 +18,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { apiDelete, apiGet, apiPost, errorDetail } from "@/lib/api";
 
-import { AiSetup, useAiStatus, ClaudePanel } from "./Providers";
+import { AiSetup, useAiStatus, ClaudePanel, providerName } from "./Providers";
 
 type Language = "da" | "en";
 type Subject = { id: string; name: string; key: string; color: string };
@@ -67,7 +67,7 @@ export function AiView({ lang, subjects }: { lang: Language; subjects: Subject[]
       <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
         <div>
           <p className="flex items-center gap-2 text-sm font-medium text-blue-600">
-            <Sparkles className="size-4" /> LektieHjælper{configured && ` · ${status.data?.provider === "codex" ? "ChatGPT" : "Cloudflare"}`}
+            <Sparkles className="size-4" /> LektieHjælper{configured && ` · ${providerName(status.data?.provider)}`}
           </p>
           <h1 className="mt-1 font-heading text-3xl font-semibold tracking-tight text-[#0b1d3a]">
             {da ? "AI-hjælper" : "AI helper"}
