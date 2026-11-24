@@ -69,7 +69,7 @@ const routes: Route[] = [
   // Hosted AI and Claude Desktop
   ["GET", /^\/ai\/status$/, "ai_status", noArgs],
   ["POST", /^\/ai\/key$/, "ai_save_key", withBody],
-  ["DELETE", /^\/ai\/key$/, "ai_forget_key", noArgs],
+  ["DELETE", /^\/ai\/key$/, "ai_forget_key", withBody],
   ["POST", /^\/ai\/codex$/, "ai_codex", withBody],
   ["POST", /^\/claude$/, "claude_action", withBody],
   ["POST", /^\/ai\/note$/, "ai_note", withBody],

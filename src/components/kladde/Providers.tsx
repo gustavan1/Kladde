@@ -10,12 +10,21 @@ type Language = "en" | "da";
 type Status = {
   configured: boolean;
   mac: boolean;
-  provider: "cloudflare" | "codex";
+  provider: Provider;
   model: string;
   account: string;
   codex_connected: boolean;
+  /** Set once a key for that service is saved (Mac only). */
+  gemini_model: string;
+  openrouter_model: string;
+  defaults: { gemini: string; openrouter: string };
   models?: string[];
 };
+type Provider = "cloudflare" | "codex" | "gemini" | "openrouter";
+type KeyService = "gemini" | "openrouter";
+
+export const providerName = (p?: Provider) =>
+  ({ codex: "ChatGPT", gemini: "Gemini", openrouter: "OpenRouter", cloudflare: "Cloudflare" })[p ?? "cloudflare"];
 export const useAiStatus = () =>
   useQuery({
     queryKey: ["ai-status"],
@@ -55,7 +64,7 @@ export function AiSetup({ lang }: { lang: Language }) {
     mutationFn: ({ action, model }: { action: string; model?: string }) => {
       if (action === "test")
         return apiPost<Status>("/ai/key", { account: id, key });
-      if (action === "forget") return apiDelete<Status>("/ai/key");
+      if (action === "forget") return apiDelete<Status>("/ai/key", { provider: "cloudflare" });
       return apiPost<Status>("/ai/codex", { action, model });
     },
     meta: { errorShownInline: true },
@@ -73,6 +82,12 @@ export function AiSetup({ lang }: { lang: Language }) {
       className="space-y-5 rounded-xl border border-blue-100 bg-white p-5 text-sm"
       data-testid="ai-setup-card"
     >
+      {s?.configured && (
+        <p className="rounded-lg bg-blue-50 px-3 py-2" data-testid="ai-active-provider">
+          {da ? "I brug: " : "In use: "}
+          <strong>{providerName(s.provider)}</strong> · {s.model}
+        </p>
+      )}
       <h2 className="font-heading text-lg font-semibold">
         Cloudflare Workers AI
       </h2>
@@ -199,6 +214,12 @@ export function AiSetup({ lang }: { lang: Language }) {
         </Link>
       </p>
       {s?.mac && (
+        <>
+          <KeySetup service="gemini" status={s} lang={lang} />
+          <KeySetup service="openrouter" status={s} lang={lang} />
+        </>
+      )}
+      {s?.mac && (
         <div className="space-y-3 border-t pt-4">
           <h2 className="font-heading text-lg font-semibold">
             ChatGPT · Codex
@@ -270,6 +291,133 @@ export function AiSetup({ lang }: { lang: Language }) {
         </p>
       )}
     </section>
+  );
+}
+
+const keyText = {
+  gemini: {
+    title: "Google Gemini",
+    steps: {
+      da: "Log ind i Google AI Studio med en Google-konto, og vælg “Create API key”. Den gratis nøgle kræver intet betalingskort. Kopiér nøglen, og indsæt den herunder.",
+      en: "Sign in to Google AI Studio with a Google account and choose “Create API key”. The free key needs no payment card. Copy the key and paste it below.",
+    },
+    signup: { url: "https://aistudio.google.com/apikey", da: "Opret Gemini-nøgle", en: "Create Gemini key" },
+    guide: { url: "https://ai.google.dev/gemini-api/docs/rate-limits", da: "Se gratis grænser", en: "View free limits" },
+    note: {
+      da: "På den gratis plan kan Google bruge det, du sender, til at forbedre sine produkter. Send ikke personlige oplysninger.",
+      en: "On the free tier, Google may use what you send to improve its products. Don't send personal information.",
+    },
+    suggestions: ["gemini-flash-latest", "gemini-flash-lite-latest", "gemini-pro-latest"],
+  },
+  openrouter: {
+    title: "OpenRouter",
+    steps: {
+      da: "Opret en OpenRouter-konto, åbn “Keys”, og opret en nøgle. Modeller der ender på :free er gratis med en daglig grænse. Kopiér modellens ID fra modellisten.",
+      en: "Create an OpenRouter account, open “Keys” and create a key. Models ending in :free cost nothing but have a daily limit. Copy the model ID from the model list.",
+    },
+    signup: { url: "https://openrouter.ai/settings/keys", da: "Opret OpenRouter-nøgle", en: "Create OpenRouter key" },
+    guide: { url: "https://openrouter.ai/models?max_price=0", da: "Se gratis modeller", en: "Browse free models" },
+    note: {
+      da: "Gratis modeller kan gemme det, du sender, hos udbyderen. Send ikke personlige oplysninger.",
+      en: "Free models may let the provider keep what you send. Don't send personal information.",
+    },
+    suggestions: ["nvidia/nemotron-3-ultra-550b-a55b:free", "nvidia/nemotron-3-ultra-550b-a55b"],
+  },
+} as const;
+
+/** Setup for a service reached with one API key and a model ID (Gemini, OpenRouter). Mac only. */
+function KeySetup({ service, status, lang }: { service: KeyService; status: Status; lang: Language }) {
+  const da = lang === "da";
+  const text = keyText[service];
+  const qc = useQueryClient();
+  const saved = status[`${service}_model`];
+  const [key, setKey] = useState("");
+  const [model, setModel] = useState<string | null>(null);
+  const chosen = (model ?? (saved || status.defaults[service])).trim();
+  const update = useMutation({
+    mutationFn: (action: "test" | "forget") =>
+      action === "test"
+        ? apiPost<Status>("/ai/key", { provider: service, key, model: chosen })
+        : apiDelete<Status>("/ai/key", { provider: service }),
+    meta: { errorShownInline: true },
+    onSuccess: (result) => {
+      qc.setQueryData(["ai-status"], result);
+      setKey("");
+      setModel(null);
+      toast.success(da ? "AI-indstillinger opdateret" : "AI settings updated");
+    },
+  });
+  return (
+    <div className="space-y-3 border-t pt-4" data-testid={`ai-setup-${service}`}>
+      <h2 className="font-heading text-lg font-semibold">
+        {text.title}
+        {status.provider === service && (
+          <span className="ml-2 rounded bg-blue-100 px-2 py-0.5 text-xs font-medium text-blue-800">
+            {da ? "I brug" : "In use"}
+          </span>
+        )}
+      </h2>
+      <p className="text-slate-700">{text.steps[lang]}</p>
+      <div className="flex flex-wrap items-center gap-3">
+        <Link button url={text.signup.url}>{text.signup[lang]}</Link>
+        <Link url={text.guide.url}>{text.guide[lang]}</Link>
+      </div>
+      <form
+        className="space-y-3"
+        onSubmit={(e) => {
+          e.preventDefault();
+          update.mutate("test");
+        }}
+      >
+        <label className="block">
+          API key
+          <Input
+            type="password"
+            autoComplete="off"
+            value={key}
+            onChange={(e) => setKey(e.target.value)}
+            placeholder={saved ? (da ? "Brug gemt nøgle" : "Use saved key") : ""}
+          />
+        </label>
+        <label className="block">
+          Model
+          <Input
+            value={model ?? (saved || status.defaults[service])}
+            onChange={(e) => setModel(e.target.value)}
+            list={`ai-models-${service}`}
+            spellCheck={false}
+            autoComplete="off"
+          />
+          <datalist id={`ai-models-${service}`}>
+            {text.suggestions.map((m) => (
+              <option key={m} value={m} />
+            ))}
+          </datalist>
+        </label>
+        <div className="flex flex-wrap gap-2">
+          <Button type="submit" disabled={update.isPending || !chosen || (!key.trim() && !saved)}>
+            {da ? `Test og brug ${text.title}` : `Test and use ${text.title}`}
+          </Button>
+          {saved && (
+            <Button type="button" variant="outline" disabled={update.isPending} onClick={() => update.mutate("forget")}>
+              {da ? "Fjern gemt nøgle" : "Remove saved key"}
+            </Button>
+          )}
+        </div>
+      </form>
+      <p className="text-xs text-slate-600">
+        {da
+          ? "Testen sender kun “Say OK”. Nøglen gemmes i computerens nøglelager. "
+          : "The test sends only “Say OK”. The key is stored in your computer’s credential store. "}
+        {text.note[lang]}
+      </p>
+      {update.isPending && <p role="status">{da ? "Forbinder…" : "Connecting…"}</p>}
+      {update.isError && (
+        <p role="alert" className="text-red-700">
+          {errorDetail(update.error, da ? "Forbindelsen mislykkedes." : "Connection failed.")}
+        </p>
+      )}
+    </div>
   );
 }
 
